@@ -1,3 +1,47 @@
+# iDrive8-RideTube (BETA)
+
+RideTube, the unofficial YouTube client for BMW head units, **ported to iDrive 8 (MGU ID8)**. Based on
+[JustAnotherPU/ridetube](https://github.com/JustAnotherPU/ridetube) (iDrive 7), GPL-3.0-or-later; the port adds an
+iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.0) and Node.js 22 marked for iDrive 8.
+
+> **Beta: not yet run on an iDrive 8 car.** It is built and tested on a computer against iDrive 8's 2880 x 960 screen,
+> and its packages install on the MGU Store's simulated iDrive 8 head unit. What may need a fix on the car (sound
+> route, GPU decoder) is under "iDrive 8" below, with how to tell from the logs. Reports welcome in the issues.
+
+## Install on an iDrive 8 car
+
+1. Root SSH on the head unit and the [MGU Store](https://github.com/robertnisipeanu/mgu-store) installed (its README).
+   Back up the head unit's coding before rooting it.
+2. The car online through the Store's uplink (`mgu-uplink`: phone hotspot, USB LTE stick or Wi-Fi).
+3. In the Store: Settings, **Add source**, type `waliworld/iDrive8-RideTube` and pick **Releases**.
+4. Install **RideTube**. The Store installs with it, from this source, its service `jap-ridetube-d` and Node.js 22
+   (`jap-node22`); from its own source the renderer `mgu-render`, `mgu-python` and the deploy tool.
+5. **Restart the head unit**: on iDrive 8 an app installs at the next start.
+6. Open RideTube from All apps. Home shows a code: enter it at google.com/device on your phone to sign in
+   (or search without signing in).
+
+Uninstall: in RideTube's Settings (left rail), Sign out; then uninstall RideTube and its service in the Store.
+
+## Releasing (maintainers)
+
+```sh
+MGU_STORE=<a clone of github.com/robertnisipeanu/mgu-store> tools/release_id8.sh   # -> dist/release/
+```
+
+Upload every file of `dist/release/` to the GitHub release tagged `catalog` (the Store reads its `catalog.json`).
+The script builds the app and packs the service and Node.js 22 from this repository; the prebuilt binaries (the video
+decoder `ytdec`, yt-dlp 2026.10.26 and the Node.js 22 build) are taken from JustAnotherPU's published releases and
+checked against sha256 sums pinned in the script.
+
+## Licence
+
+GPL-3.0-or-later, as RideTube ([LICENSE](LICENSE), copyright JustAnotherPU and contributors). The app kit (`kit/`) and
+the Node.js 22 tool (`tools/jap-node22/`) are MIT ([kit/LICENSE](kit/LICENSE),
+[tools/jap-node22/LICENSE.mgu-apps](tools/jap-node22/LICENSE.mgu-apps)); third-party parts as in
+[THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).
+
+---
+
 # RideTube
 
 > **Experimental and unofficial.** RideTube is an unofficial client for YouTube. It is not affiliated with,
@@ -65,8 +109,8 @@ car-tested iDrive 8 apps, **not yet run on an iDrive 8 car**. Reports welcome in
   recent searches work while driving.
 - The rail's **Settings** has the account (Sign in, Sign out pressed twice) and the settings.
 - The video is decoded as a 16:9 frame as tall as the app area (1358 x 764).
-- Needs `jap-node22` with iDrive 8 in its catalog (mgu-apps, `idrive8` change). Until that is released the Store
-  says the service "needs jap-node22, but Node.js 22 is for iDrive 7".
+- Needs `jap-node22` with iDrive 8 in its catalog: this repository's release has it (JustAnotherPU/mgu-apps lists it
+  for iDrive 7 only, so its source alone stops the install with "needs jap-node22").
 
 What may need a fix on the car, and how to tell (`journalctl -u jap-ridetube-d`, the app's
 `/var/opt/public/oap/oap_<uid>/data/jap_ridetube8.log`):

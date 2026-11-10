@@ -743,7 +743,8 @@ async function main() {
         await waitUntil(() => ytdecLines().filter((l) => / argv /.test(l)).length === 2);
         const argv = ytdecLines().filter((l) => / argv /.test(l));
         assert.ok(!/--fill/.test(argv[0]) && /--rect 1280x720 --fill /.test(argv[1]), argv.join('\n'));
-        assert.ok(ytdecLines().some((l) => / in seek 40\d\d$/.test(l)), 'at the clock');
+        // (the seek reaches the new ytdec a moment after its start line: waited for, not raced)
+        await waitUntil(() => ytdecLines().some((l) => / in seek 40\d\d$/.test(l)), 2000).catch(() => assert.fail('at the clock: ' + ytdecLines().slice(-3).join(' | ')));
         c.send({ cmd: 'fill', on: true });
         await sleep(300);
         assert.strictEqual(ytdecLines().filter((l) => / argv /.test(l)).length, 2);
