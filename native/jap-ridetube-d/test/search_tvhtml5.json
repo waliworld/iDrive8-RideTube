@@ -1,0 +1,314 @@
+{
+ "contents": {
+  "sectionListRenderer": {
+   "contents": [
+    {
+     "shelfRenderer": {
+      "headerRenderer": {
+       "shelfHeaderRenderer": {
+        "avatarLockup": {
+         "avatarLockupRenderer": {
+          "title": {
+           "simpleText": "Search results for big buck bunny"
+          },
+          "size": "AVATAR_LOCKUP_SIZE_SMALL"
+         }
+        }
+       }
+      },
+      "content": {
+       "horizontalListRenderer": {
+        "items": [
+         {
+          "lockupViewModel": {
+           "contentImage": {
+            "thumbnailViewModel": {
+             "image": {
+              "sources": [
+               {
+                "url": "https://i.ytimg.com/vi/f7NwyBnIRTE/hqdefault.jpg?sqp=-oaymwEVCMACELQBSFDyq4qpAwcVAACIQhgB&rs=AOn4CLCDqCQxXLvZZO3lrLyWhmaMRkB-Kg",
+                "width": 320,
+                "height": 180
+               }
+              ]
+             },
+             "overlays": [
+              {
+               "thumbnailBottomOverlayViewModel": {
+                "badges": [
+                 {
+                  "thumbnailBadgeViewModel": {
+                   "text": "10:35",
+                   "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT",
+                   "rendererContext": {}
+                  }
+                 }
+                ]
+               }
+              }
+             ]
+            }
+           },
+           "metadata": {
+            "lockupMetadataViewModel": {
+             "title": {
+              "content": "Animated Short Film \"Big Buck Bunny\", 4K, Full Length"
+             },
+             "metadata": {
+              "contentMetadataViewModel": {
+               "metadataRows": [
+                {
+                 "metadataParts": [
+                  {
+                   "text": {
+                    "content": "AnimalsReview"
+                   }
+                  }
+                 ]
+                },
+                {
+                 "metadataParts": [
+                  {
+                   "text": {
+                    "content": "37M views"
+                   }
+                  },
+                  {
+                   "text": {
+                    "content": "11 years ago"
+                   },
+                   "accessibilityLabel": "11 years ago"
+                  }
+                 ],
+                 "badges": [
+                  {
+                   "badgeViewModel": {
+                    "badgeText": "4K",
+                    "badgeStyle": "BADGE_DEFAULT"
+                   }
+                  }
+                 ]
+                }
+               ],
+               "delimiter": " • "
+              }
+             },
+             "metadataStyling": {
+              "secondaryFontSize": "LOCKUP_METADATA_FONT_SIZE_SMALL"
+             }
+            }
+           },
+           "contentId": "f7NwyBnIRTE",
+           "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+           "rendererContext": {
+            "commandContext": {
+             "onTap": {
+              "innertubeCommand": {
+               "watchEndpoint": {
+                "videoId": "f7NwyBnIRTE"
+               }
+              }
+             }
+            }
+           }
+          }
+         },
+         {
+          "lockupViewModel": {
+           "contentImage": {
+            "thumbnailViewModel": {
+             "image": {
+              "sources": [
+               {
+                "url": "https://i.ytimg.com/vi/PJx173L9jWw/hqdefault.jpg?sqp=-oaymwEVCMACELQBSFDyq4qpAwcVAACIQhgB&rs=AOn4CLCVavyhxoUztWPsvTSiN5MGqDfM6w",
+                "width": 320,
+                "height": 180
+               }
+              ]
+             },
+             "overlays": [
+              {
+               "thumbnailBottomOverlayViewModel": {
+                "badges": [
+                 {
+                  "thumbnailBadgeViewModel": {
+                   "text": "2:50:05",
+                   "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT",
+                   "rendererContext": {}
+                  }
+                 }
+                ]
+               }
+              }
+             ]
+            }
+           },
+           "metadata": {
+            "lockupMetadataViewModel": {
+             "title": {
+              "content": "Big Buck Bunny creative common Blender Foundation Short Film"
+             },
+             "metadata": {
+              "contentMetadataViewModel": {
+               "metadataRows": [
+                {
+                 "metadataParts": [
+                  {
+                   "text": {
+                    "content": "Miniaiza"
+                   }
+                  }
+                 ]
+                },
+                {
+                 "metadataParts": [
+                  {
+                   "text": {
+                    "content": "36 views"
+                   }
+                  },
+                  {
+                   "text": {
+                    "content": "Streamed 15 hours ago"
+                   },
+                   "accessibilityLabel": "Streamed 15 hours ago"
+                  }
+                 ],
+                 "badges": [
+                  {
+                   "badgeViewModel": {
+                    "badgeText": "New",
+                    "badgeStyle": "BADGE_DEFAULT"
+                   }
+                  }
+                 ]
+                }
+               ],
+               "delimiter": " • "
+              }
+             },
+             "metadataStyling": {
+              "secondaryFontSize": "LOCKUP_METADATA_FONT_SIZE_SMALL"
+             }
+            }
+           },
+           "contentId": "PJx173L9jWw",
+           "contentType": "LOCKUP_CONTENT_TYPE_VIDEO",
+           "rendererContext": {
+            "commandContext": {
+             "onTap": {
+              "innertubeCommand": {
+               "watchEndpoint": {
+                "videoId": "PJx173L9jWw"
+               }
+              }
+             }
+            }
+           }
+          }
+         },
+         {
+          "lockupViewModel": {
+           "contentImage": {
+            "thumbnailViewModel": {
+             "image": {
+              "sources": [
+               {
+                "url": "https://i.ytimg.com/vi/OR6rRQ1fAzM/hqdefault.jpg?sqp=-oaymwEVCMACELQBSFDyq4qpAwcVAACIQhgB&rs=AOn4CLDLCRoqPHjYlyG_SxylGL9qfCONEw",
+                "width": 320,
+                "height": 180
+               }
+              ]
+             },
+             "overlays": [
+              {
+               "thumbnailBottomOverlayViewModel": {
+                "badges": [
+                 {
+                  "thumbnailBadgeViewModel": {
+                   "icon": {
+                    "sources": [
+                     {
+                      "clientResource": {
+                       "imageName": "AUDIO"
+                      }
+                     }
+                    ]
+                   },
+                   "text": "3:33",
+                   "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT",
+                   "rendererContext": {}
+                  }
+                 }
+                ]
+               }
+              }
+             ]
+            }
+           },
+           "metadata": {
+            "lockupMetadataViewModel": {
+             "title": {
+              "content": "LES ANIMOJIS - LA CHANSON DU GROS LAPIN (CLIP)"
+             },
+             "metadata": {
+              "contentMetadataViewModel": {
+               "metadataRows": [
+                {
+                 "metadataParts": [
+                  {
+                   "text": {
+                    "content": "Monsieur Seby"
+                   }
+                  }
+                 ]
+                },
+                {
+                 "metadataParts": [
+                  {
+                   "text": {
+                    "content": "1.7M views"
+                   }
+                  },
+                  {
+                   "text": {
+                    "content": "8 years ago"
+                   },
+                   "accessibilityLabel": "8 years ago"
+                  }
+                 ]
+                }
+               ],
+               "delimiter": " • "
+              }
+             },
+             "metadataStyling": {
+              "secondaryFontSize": "LOCKUP_METADATA_FONT_SIZE_SMALL"
+             }
+            }
+           },
+           "contentId": "OR6rRQ1fAzM",
+           "contentType": "LOCKUP_CONTENT_TYPE_MUSIC",
+           "rendererContext": {
+            "commandContext": {
+             "onTap": {
+              "innertubeCommand": {
+               "watchEndpoint": {
+                "videoId": "OR6rRQ1fAzM",
+                "playlistId": "RDOR6rRQ1fAzM"
+               }
+              }
+             }
+            }
+           }
+          }
+         }
+        ]
+       }
+      }
+     }
+    }
+   ]
+  }
+ }
+}

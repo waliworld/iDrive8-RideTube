@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[Unit]
+Description=jap-ridetube-d: RideTube daemon (BMW MediaPlayer audio, ytdec video, ctl socket for the app)
+RequiresMountsFor=/var/opt
+After=local-fs.target
+
+[Service]
+# root: SOME/IP to the MediaPlayer.
+User=root
+ExecStartPre=-/bin/sh -c 'mkdir -p /var/opt/jap-ridetube-d/cache /var/opt/jap-ridetube-d/log /var/opt/jap-ridetube-d/state && chmod 0755 /var/opt/jap-ridetube-d && chmod 0711 /var/opt/jap-ridetube-d/cache && chmod 0700 /var/opt/jap-ridetube-d/state'
+# youtube.com/tv answers with 11 kB of headers; Node 8.14+ refuses more than 8 kB (HPE_HEADER_OVERFLOW)
+ExecStart=/usr/bin/node --max-http-header-size=65536 /var/opt/jap-ridetube-d/current/ytd.js
+# The app (group tm_oap_app) must traverse the dir; ctl.sock itself is 0660 root:tm_oap_app.
+RuntimeDirectory=jap-ridetube-d
+RuntimeDirectoryMode=0755
+# The daemon starts idle and stays active with no app and no SOME/IP yet
+# (it retries those itself), so the deploy health check sees it active.
+Restart=on-failure
+# 3 s keeps clear of systemd's 5-starts-in-10-s limit.
+RestartSec=3
+# SIGTERM releases the audio connection, then exits (4 s cap in ytd.js).
+TimeoutStopSec=5
+# 1, not 0: with a pipe core_pattern the kernel still pipes a core at limit 0 and skips
+# only at 1 (its recursion guard), so the crash handler never sees ytd.js or ytdec.
+# mgu-deploy adds the same LimitCORE=1 drop-in to every tool unit.
+LimitCORE=1
+
+[Install]
+WantedBy=multi-user.target

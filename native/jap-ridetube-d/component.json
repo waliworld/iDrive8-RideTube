@@ -1,0 +1,97 @@
+{
+  "id": "jap-ridetube-d",
+  "kind": "tool",
+  "version": "0.4.0",
+  "license": "GPL-3.0-or-later",
+  "title": "RideTube service",
+  "description": "The car side of RideTube, an unofficial client for YouTube: yt-dlp (from its official release, run in mgu-python) fetches as the daemon's own internet uid; search, feeds and thumbnails on the car (jap-node22); audio through the BMW MediaPlayer, video decoded by ytdec into the mgu-render video layer; TV device sign-in; controlled by the RideTube app over /run/jap-ridetube-d/ctl.sock. iDrive 7 and iDrive 8",
+  "requires": {
+    "mgu-deploy": "0.7.0",
+    "mgu-python": "1.0.2",
+    "jap-node22": "22.23.4",
+    "mgu-render": "0.6.11"
+  },
+  "uninstallable": true,
+  "internet": true,
+  "uids": "state/internet-uids",
+  "mguHmi": [
+    "ID7",
+    "ID8"
+  ],
+  "files": [
+    {
+      "path": "ytd.js",
+      "from": "ytd.js",
+      "mode": "0644"
+    },
+    {
+      "path": "ytdec",
+      "from": "build/ytdec",
+      "mode": "0755"
+    },
+    {
+      "path": "ytfetch.py",
+      "from": "ytfetch.py",
+      "mode": "0644"
+    },
+    {
+      "path": "ytdlp.pyz",
+      "from": "build/ytdlp.pyz",
+      "mode": "0644"
+    },
+    {
+      "path": "thumb.js",
+      "from": "thumb.js",
+      "mode": "0644"
+    },
+    {
+      "path": "vendor/jpeg-js/decoder.js",
+      "from": "vendor/jpeg-js/decoder.js",
+      "mode": "0644"
+    },
+    {
+      "path": "vendor/jpeg-js/LICENSE",
+      "from": "vendor/jpeg-js/LICENSE",
+      "mode": "0644"
+    },
+    {
+      "path": "check.sh",
+      "from": "check.sh",
+      "mode": "0755"
+    },
+    {
+      "path": "LICENSE",
+      "from": "../../LICENSE",
+      "mode": "0644"
+    },
+    {
+      "path": "THIRD_PARTY_LICENSES",
+      "from": "../../THIRD_PARTY_LICENSES",
+      "mode": "0644"
+    }
+  ],
+  "check": [
+    "check.sh"
+  ],
+  "units": [
+    {
+      "name": "jap-ridetube-d.service",
+      "from": "systemd/jap-ridetube-d.service"
+    }
+  ],
+  "enable": [
+    {
+      "unit": "jap-ridetube-d.service",
+      "target": "multi-user.target"
+    }
+  ],
+  "crashNames": [
+    "ytdec"
+  ],
+  "recmgr": [
+    "jap-ridetube-d"
+  ],
+  "restart": [
+    "jap-ridetube-d.service"
+  ]
+}

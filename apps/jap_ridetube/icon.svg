@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- RideTube: a night road running to the horizon under a glowing screen with a rounded play mark. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a0f26"/>
+      <stop offset="0.62" stop-color="#1b1747"/>
+      <stop offset="0.64" stop-color="#05070c"/>
+      <stop offset="1" stop-color="#05070c"/>
+    </linearGradient>
+    <radialGradient id="haze" cx="0.5" cy="0.6" r="0.55">
+      <stop offset="0" stop-color="#ff3fa4" stop-opacity="0.5"/>
+      <stop offset="0.55" stop-color="#7a3cff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#7a3cff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="play" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffd36b"/>
+      <stop offset="1" stop-color="#ff3f8e"/>
+    </linearGradient>
+    <linearGradient id="road" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1d2c"/>
+      <stop offset="1" stop-color="#0d0f18"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9cf0ff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#3ad6ff"/>
+    </linearGradient>
+    <clipPath id="tile"><rect x="8" y="8" width="240" height="240" rx="54"/></clipPath>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#sky)"/>
+  <g clip-path="url(#tile)">
+    <rect x="0" y="30" width="256" height="210" fill="url(#haze)"/>
+    <g fill="#cfe2ff">
+      <circle cx="48" cy="46" r="1.6" opacity="0.8"/>
+      <circle cx="210" cy="40" r="1.2" opacity="0.6"/>
+      <circle cx="30" cy="120" r="1.0" opacity="0.5"/>
+      <circle cx="228" cy="128" r="1.2" opacity="0.6"/>
+    </g>
+    <!-- the road to the horizon (y 160) -->
+    <path d="M118 160 L138 160 L214 256 L42 256 Z" fill="url(#road)"/>
+    <path d="M118 160 L42 256" stroke="url(#edge)" stroke-width="3"/>
+    <path d="M138 160 L214 256" stroke="url(#edge)" stroke-width="3"/>
+    <g fill="#ffd36b" opacity="0.85">
+      <rect x="126.5" y="172" width="3" height="10" rx="1.5"/>
+      <rect x="126" y="196" width="4" height="15" rx="2"/>
+      <rect x="125.5" y="226" width="5" height="22" rx="2.5"/>
+    </g>
+    <rect x="0" y="159" width="256" height="2" fill="#3ad6ff" opacity="0.55"/>
+  </g>
+  <!-- the screen: a cyan outline, open dark glass, the rounded play mark glowing inside -->
+  <rect x="58" y="58" width="140" height="92" rx="20" fill="#0a0f26" fill-opacity="0.72" stroke="#3ad6ff" stroke-width="6"/>
+  <rect x="58" y="58" width="140" height="92" rx="20" fill="none" stroke="#9cf0ff" stroke-opacity="0.35" stroke-width="14"/>
+  <path d="M112 84 Q112 73 122 78.5 L152 96 Q160 104 152 112 L122 129.5 Q112 135 112 124 Z" fill="url(#play)"/>
+</svg>

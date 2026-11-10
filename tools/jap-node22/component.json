@@ -1,0 +1,40 @@
+{
+  "id": "jap-node22",
+  "kind": "tool",
+  "version": "22.23.4",
+  "license": "MIT",
+  "title": "Node.js 22",
+  "description": "Node.js 22 LTS (nodejs.org unofficial-builds linux-x64-glibc-217: the unit has glibc 2.27) for the background services of Moonride and RideTube, called by absolute path /var/opt/jap-node22/current/bin/node; BMW's apps keep the system Node 8",
+  "requires": {
+    "mgu-deploy": "0.7.0"
+  },
+  "uninstallable": true,
+  "mguHmi": [
+    "ID7",
+    "ID8"
+  ],
+  "files": [
+    {
+      "path": "bin/node",
+      "from": "build/node",
+      "mode": "0755"
+    },
+    {
+      "path": "LICENSE",
+      "from": "build/LICENSE",
+      "mode": "0644"
+    },
+    {
+      "path": "check.sh",
+      "from": "check.sh",
+      "mode": "0755"
+    }
+  ],
+  "check": [
+    "check.sh"
+  ],
+  "units": [],
+  "enable": [],
+  "recmgr": [],
+  "restart": []
+}
