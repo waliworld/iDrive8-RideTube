@@ -107,11 +107,12 @@ class RenderClient extends EventEmitter {
         s.on('data', (d) => this._data(d));
         s.on('error', (e) => {
             if (!this.connected) this.at = (this.at || 0) + 1;      // the next socket at the next try
+            this.lastErr = String(e.code || e.message);
             if (!this.errLogged) { this.errLogged = true; this.log.warn('renderd: ' + e.message); }
         });
         s.on('close', () => {
             const was = this.ready;
-            this.connected = this.ready = this.native = false; this.sock = null; this.waiting = false; this.onScreen = null;
+            this.connected = this.ready = this.native = false; this.sock = null; this.waiting = false; this.onScreen = null; this.front = null;
             if (was) { this.log.warn('renderd: connection closed'); this.emit('close'); }
             if (!this.closed) this.retry = setTimeout(() => { this.retry = null; this.connect(); }, 3000);
         });
@@ -182,6 +183,8 @@ class RenderClient extends EventEmitter {
                 const caps = p.readUInt32LE(8);
                 this.native = true;
                 this.info = { touch: !!(caps & 1), controller: !!(caps & 2), frontGate: !!(caps & 4) };
+                // (the app area the renderer has for this head unit, where its X_READY is long enough to say)
+                if (p.length >= 44) this.info.appArea = { x: p.readInt32LE(28), y: p.readInt32LE(32), w: p.readInt32LE(36), h: p.readInt32LE(40) };
             } else if (type === E.READY) {
                 this.ready = true; this.errLogged = false;
                 this.screen = { w: p.readUInt32LE(4), h: p.readUInt32LE(8) };
@@ -200,6 +203,7 @@ class RenderClient extends EventEmitter {
                 const on = !!p.readUInt32LE(4), front = !!p.readUInt32LE(8);
                 if (on !== this.onScreen) this.log.info('renderd: ' + (on ? 'on screen' : 'not on screen') + (front ? '' : ' (not in front)'));
                 this.onScreen = on;
+                this.front = front;
                 this.emit('state', { onScreen: on, front });
             } else if (this.native && type === X.CCU && p.length >= 5) {
                 this.emit('ccu', {
@@ -208,6 +212,7 @@ class RenderClient extends EventEmitter {
                 });
             } else if (type === E.TICK) {
                 this.waiting = false;
+                this.ticks = (this.ticks || 0) + 1;
                 this.emit('tick', p.readUInt32LE(0), p.readUInt32LE(4));
             } else if ((this.claimed || this.native) && type === TOUCH && p.length >= 12) {
                 this.emit('touch', p.readUInt32LE(0), p.readFloatLE(4), p.readFloatLE(8));
@@ -328,6 +333,7 @@ class RenderClient extends EventEmitter {
         if (!this.ready || !this.placement) return false;
         this._ensureRes(r);
         this.waiting = true;
+        this.frames = (this.frames || 0) + 1;
         return this._write(msg(M.FRAME, words(r.words())));
     }
 }

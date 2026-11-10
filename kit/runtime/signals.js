@@ -17,8 +17,11 @@
 const fs = require('fs');
 const path = require('path');
 
+// iDrive 8 (app-spec.json "hmi": "ID8"): through the SDK's own typed proxies, as IterioDev's car-tested apps read the
+// car there (watchSdk below) - the native binding and the interface files this module reads are iDrive 7's
+const ID8 = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'app-spec.json'), 'utf8')).hmi === 'ID8'; } catch (e) { return false; } })();
 let someip = null;
-try { someip = require('someip'); } catch (e) { /* host preview / not installed */ }
+if (!ID8) try { someip = require('someip'); } catch (e) { /* host preview / not installed */ }
 
 const APP_ROOT = path.resolve(__dirname, '..', '..', '..');
 const DIRS = [path.join(APP_ROOT, 'someipInterfaces'), path.join(__dirname, '..', '..', 'someipdefs')];
@@ -52,6 +55,7 @@ function loadConfig(iface) {
  */
 async function watch(iface, instance, handlers, log, opts) {
     const res = { iface, available: false, proxy: null, error: null, shutdown: () => Promise.resolve() };
+    if (ID8) return watchSdk(res, iface, instance, handlers, log, opts);
     if (!someip) { res.error = 'someip native module not available'; return res; }
     try {
         const cfg = loadConfig(iface);
@@ -80,6 +84,41 @@ async function watch(iface, instance, handlers, log, opts) {
         res.error = String(e);
         if (log) log.warn('signals ' + iface + ': ' + e);
     }
+    return res;
+}
+
+/**
+ * iDrive 8: the SDK's typed proxy of the interface (someipBuilders.buildAndInitTypedProxy, the timeout as a number:
+ * what both SDKs take). Each field is read at once and then every opts.pollMs (10 s without), and subscribed where
+ * the proxy offers it. Returns at once: a provider that is not there yet is tried again every 15 s and never holds
+ * the app's start; res.error says why meanwhile.
+ */
+function watchSdk(res, iface, instance, handlers, log, opts) {
+    let builders = null;
+    try { builders = require('oap-sdk').someipBuilders; } catch (e) { /* no SDK (host preview) */ }
+    if (!builders || typeof builders.buildAndInitTypedProxy !== 'function') { res.error = 'no someipBuilders in this SDK'; return res; }
+    const fields = Object.keys(handlers || {});
+    const give = (f, v) => { try { handlers[f](v); } catch (e) { if (log) log.warn(iface + '.' + f + ': ' + e); } };
+    let said = false;
+    const connect = () => Promise.resolve().then(() => builders.buildAndInitTypedProxy(iface, String(instance), 10000)).then((p) => {
+        res.proxy = p; res.available = true; res.error = null;
+        if (log) log.info('signals ' + iface + ': connected (SDK proxy)');
+        const read = () => fields.forEach((f) => {
+            if (p[f] && typeof p[f].getValue === 'function') Promise.resolve().then(() => p[f].getValue()).then((v) => give(f, v), () => {});
+        });
+        fields.forEach((f) => {
+            if (p[f] && typeof p[f].subscribe === 'function') Promise.resolve().then(() => p[f].subscribe((v) => give(f, v))).catch(() => {});
+        });
+        read();
+        const t = setInterval(read, (opts && opts.pollMs) || 10000);
+        if (t.unref) t.unref();
+    }, (e) => {
+        res.error = String(e && e.message || e);
+        if (log && !said) { said = true; log.warn('signals ' + iface + ': ' + res.error + ' (tried again every 15 s)'); }
+        const t = setTimeout(connect, 15000);
+        if (t.unref) t.unref();
+    });
+    connect();
     return res;
 }
 

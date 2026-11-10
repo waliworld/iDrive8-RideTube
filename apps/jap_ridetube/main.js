@@ -114,8 +114,11 @@ mgu.run({
             show(m);
             if (backKey[m] && ctx.focus) ctx.focus(backKey[m]);
         }
-        ctl.on('up', () => { model.setConnected(true); changed(); });
-        ctl.on('down', () => { model.setConnected(false); changed(); });
+        // (iDrive 8: the service's state among the page's status lines, read when the drawn screen does not come)
+        const service = () => { if (ctx.status) ctx.status('Service (jap-ridetube-d): ' + (ctl.up ? 'connected' : 'not answering - is the RideTube service installed? (the Store, Tools)')); };
+        ctl.on('up', () => { model.setConnected(true); changed(); service(); });
+        ctl.on('down', () => { model.setConnected(false); changed(); service(); });
+        service();
         ctl.on('msg', (m) => {
             model.onMsg(m);
             if (m.ev === 'error') log.warn('jap-ridetube-d: ' + m.msg);

@@ -174,18 +174,41 @@ class Display {
     /** iDrive 8: why the screen shows nothing but the HMI's page, or null when the renderer has it. */
     _id8Why() {
         const g = this.gpu;
-        if (!g) return 'needs the GPU renderer mgu-render (not running)';
+        if (!g) return 'the GPU renderer (mgu-render) is not running';
         if (!g.ready) return 'waiting for the GPU renderer (mgu-render)';
-        if (this.blocked) return 'the renderer shows another app (restart the head unit)';
+        if (this.blocked) return 'the GPU renderer does not see this app in front';
         if (!this.own()) return g.screen.w !== HMI.screen.w || g.screen.h !== HMI.screen.h
-            ? 'screen ' + g.screen.w + 'x' + g.screen.h + ' is not iDrive 8\'s 2880x960' : 'update mgu-render (touch)';
-        if (g.visible && g.onScreen === false) return 'the renderer hides it (restart the head unit)';
+            ? 'screen ' + g.screen.w + 'x' + g.screen.h + ' is not the 2880x960 this version draws for'
+            : !g.touch ? 'the GPU renderer has no touch routing (update mgu-render)' : 'the GPU renderer gave no placement yet';
+        if (g.visible && g.onScreen === false) return 'the GPU renderer is not showing the picture';
         return null;
     }
-    /** iDrive 8: the page's title (the HMI's own) says why the screen stays empty, once it has for 4 s. */
+    /**
+     * iDrive 8, once a second: the HMI's own page under the surface says how things stand - four status lines in
+     * its list (what the app, the page, the renderer and the app's service say; build.py's INFO labels), read when
+     * the drawn screen does not come, and the reason in the page's title once the screen has stayed empty for 4 s.
+     */
     _id8Status() {
-        if (!this.screen || !this.ui.isVisible || !this.ui.isVisible(this.screen.name)) { this.whySince = 0; return; }
+        if (!this.screen) return;
+        const ui = this.ui, g = this.gpu, h = ui.hmi || {}, n = this.screen.name;
         const why = this._id8Why(), now = Date.now();
+        const vis = !!(ui.isVisible && ui.isVisible(n));
+        const b = (v) => (v === null || v === undefined ? '?' : v ? 'yes' : 'no');
+        if (ui.info) {
+            const fatal = ui.lastFatal ? ui.lastFatal() : null, a = g && g.info && g.info.appArea;
+            ui.info(n + '_INFO1', this.spec.title + ' ' + this.spec.version + ' for iDrive 8: running | start: ' + (h.start || '?') +
+                ' | tile: ' + (h.entry || '?') + ' | page: ' + (h.open || '?') + (fatal ? ' | error: ' + fatal : ''));
+            ui.info(n + '_INFO2', 'Screen: ' + (why || 'drawn by the GPU renderer (if you can read this, its picture is not reaching the display)') +
+                ' | page: visible ' + b(h.visible) + ', focus ' + b(h.focus) + ', stack ' + (h.stack || '-') + (h.fallback ? ' (no visible events)' : '') + ', shown ' + b(vis));
+            ui.info(n + '_INFO3', 'Renderer: ' + (!g ? 'no socket - is the GPU renderer (mgu-render) installed and running?'
+                : (g.ready ? 'connected' : 'not connected' + (g.lastErr ? ' (' + g.lastErr + ')' : '')) + ' ' + (g.path || '') + (!g.ready ? ''
+                    : ' | ' + (g.native ? 'mgu-render/1' : 'older dialect') + ', touch ' + b(g.touch) + ', gate ' + b(g.info && g.info.frontGate) +
+                      ' | screen ' + g.screen.w + 'x' + g.screen.h + (a ? ', area ' + [a.x, a.y, a.w, a.h].join(',') : '') +
+                      ' | in front ' + b(g.front) + ', on screen ' + b(g.onScreen) + ', asked ' + b(g.visible) +
+                      ' | frames ' + b(g.frames > 0) + ', ticks ' + b(g.ticks > 0))));
+            ui.info(n + '_INFO4', this.appStatus || 'App: started');
+        }
+        if (!vis) { this.whySince = 0; return; }
         if (why && !this.whySince) this.whySince = now;
         if (!why) this.whySince = 0;
         const show = why && now - this.whySince >= 4000 ? why : null;
@@ -193,7 +216,8 @@ class Display {
         this.titleWhy = show;
         const title = this.screen.title || this.spec.title || '';
         if (show) this.log.warn('display: the screen stays empty: ' + show);
-        if (this.ui.text) Promise.resolve(this.ui.text(this.screen.name + '_TITLE', show ? title + ' - ' + show : title)).catch(() => {});
+        if (ui.info) ui.info(n + '_TITLE', show ? title + ' - ' + show : title);
+        else if (ui.text) Promise.resolve(ui.text(n + '_TITLE', show ? title + ' - ' + show : title)).catch(() => {});
     }
 
     /** Start / stop the GPU path for the 'renderer' setting; wait for the socket if it isn't there yet. */
@@ -305,7 +329,9 @@ class Display {
     /** HMI back (the controller pushed left): the app's screen closes as with the HMI's back arrow. */
     _back() {
         this.log.info('display: back (controller pushed left, or the kit\'s back button)');
-        Promise.resolve(this.ui.close(this.screen.name)).catch((e) => this.log.warn('back: ' + e));
+        Promise.resolve(this.ui.close(this.screen.name)).catch((e) => this.log.warn('back: ' + e))
+            // (iDrive 8: the surface goes with it for sure - on an HMI that does not say the page went it would stay up)
+            .then(() => { if (ID8 && this.ui._setVisible) this.ui._setVisible(this.screen.name, false); });
     }
     /** A sheet can be shown now (else the app falls back to the HMI's own screens). */
     canSheet() { return this.own() && this.active(); }

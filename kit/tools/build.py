@@ -381,14 +381,30 @@ def build_ui_id8(spec):
         state_ids[scr['name']] = cid
         key = scr['name'] + '_TITLE'
         strings[sid(app, key)] = scr.get('title', spec['title'])
+        # four status lines in the page's list (labels as the Store's iDrive 8 pages have them): the renderer's
+        # surface covers them while it draws; when it does not they say why, instead of an empty grey page. Their
+        # first text is the package's own, so it shows even when the app's code never ran.
+        lines = [('INFO1', '%s %s for iDrive 8' % (spec['title'], spec['version'])),
+                 ('INFO2', 'Starting... If this text stays, the app did not start. Please send a photo of this screen.'),
+                 ('INFO3', 'Renderer: not asked yet'),
+                 ('INFO4', 'App: not started yet')]
         xml += [f'    <container id="{cid}" type="state" widget="LT_State_Wide_List">',
                 f'        <layoutGroup id="{cid + 200}" name="Titlebar">',
                 f'            <component id="{cid + 220}" type="title">', '                <property id="2" value="1"/>',
                 '            </component>', '        </layoutGroup>',
-                f'        <layoutGroup id="{cid + 400}" name="List">', '            <property id="3" value="1"/>',
-                '        </layoutGroup>', '    </container>']
-        ui['containers'][str(cid)] = {'type': 'state', 'name': scr['name'], 'components': {
-            str(cid + 220): {'type': 'title', 'name': key, 'rows': [{'Text': {'value': sid(app, key), 'type': 'StringId'}}]}}}
+                f'        <layoutGroup id="{cid + 400}" name="List">', '            <property id="3" value="1"/>']
+        comps = {str(cid + 220): {'type': 'title', 'name': key, 'rows': [{'Text': {'value': sid(app, key), 'type': 'StringId'}}]}}
+        for j, (suffix, text) in enumerate(lines):
+            lid, lkey = cid + 410 + 10 * j, scr['name'] + '_' + suffix
+            strings[sid(app, lkey)] = text
+            xml += [f'            <component id="{lid}" type="label" widget="LT_ScrollLabel">',
+                    '                <property id="2" value="1"/>', '                <property id="3" value="0"/>',
+                    '            </component>']
+            comps[str(lid)] = {'type': 'label', 'name': lkey,
+                               'properties': {'Visible': {'value': 1, 'type': 'UInt'}, 'Focusable': {'value': 0, 'type': 'UInt'}},
+                               'rows': [{'Text': {'value': sid(app, lkey), 'type': 'StringId'}}]}
+        xml += ['        </layoutGroup>', '    </container>']
+        ui['containers'][str(cid)] = {'type': 'state', 'name': scr['name'], 'components': comps}
     if not state_ids:
         sys.exit('%s: iDrive 8 needs a "canvas" screen (the page the renderer draws)' % app)
     xml.append('</application>')
@@ -398,6 +414,11 @@ def build_ui_id8(spec):
 def manifest_for(spec, hmi='ID7'):
     proxies = dict(ID8_PROXIES if hmi == 'ID8' else PLATFORM_PROXIES)
     for iface, fields in spec.get('signals', {}).items():
+        if hmi == 'ID8':
+            # the whole interface, as IterioDev's car-tested iDrive 8 apps name the car's (Vehicle2, CDS): the kit
+            # reads them through the SDK's typed proxies there (signals.js)
+            proxies[iface] = '*'
+            continue
         inst = fields.pop('_instances', '1') if isinstance(fields, dict) else '1'
         entry = {'instances': inst}
         if isinstance(fields, dict):
@@ -500,6 +521,10 @@ def build(app_id, language='en', hmi='ID7'):
     manifest = manifest_for(json.loads(json.dumps(spec)), hmi)
     xml, uidesc, strings, state_ids = build_ui_id8(spec) if hmi == 'ID8' else build_ui(spec, language)
     unicode_resources(uidesc, strings, language)
+    if hmi == 'ID8':
+        # the string bundle as IterioDev's iDrive 8 apps have it: the page's own texts only (the kit writes plain
+        # ASCII into the page's status lines there, never through the dynamic string slots)
+        strings = {k: v for k, v in strings.items() if not k.startswith('SID_CN_DYNAMIC_')}
     for lang, tbl in spec.get('strings', {}).items():
         strings.update(tbl)
 

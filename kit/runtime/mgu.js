@@ -27,7 +27,9 @@ const { HmiText } = require('./hmi-text');
 const { listSheet } = require('./sheet');
 const { Life } = require('./life');
 
-const sdkLog = logging.getSDKLogger();
+// (an oap-sdk generated on the head unit leaves out a name its donor app does not resolve: without the SDK's logger
+// the app's own log file is the log)
+const sdkLog = logging && logging.getSDKLogger ? logging.getSDKLogger() : { error() {}, warn() {}, info() {}, debug() {} };
 const SPEC = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-spec.json'), 'utf8'));
 // iDrive 8 (kit/tools/build.py --hmi ID8): the HMI has an empty host page per drawn screen and nothing else of the app's;
 // the kit draws the rest (display.js). Components the app names that aren't there (menus, bar buttons) are quiet:
@@ -82,7 +84,14 @@ const log = {};
 });
 
 // crashes otherwise only reach DLT; keep the reason next to the app's log
-process.on('uncaughtException', (e) => { fileLog('FATAL', 'uncaught: ' + (e && e.stack || e)); process.exit(1); });
+// (iDrive 8: logged and shown on the app's page, and the app runs on - an app that exits there leaves a tile that opens
+// nothing, with no word of why)
+let lastFatal = null;
+process.on('uncaughtException', (e) => {
+    fileLog('FATAL', 'uncaught: ' + (e && e.stack || e));
+    lastFatal = String(e && e.message || e).slice(0, 120);
+    if (!ID8) process.exit(1);
+});
 process.on('exit', (code) => fileLog(code ? 'FATAL' : 'INFO', 'exit code ' + code + ' rss=' + Math.round(process.memoryUsage().rss / 1048576) + 'MB'));
 
 /* ---------------- settings (persisted in data/settings.json) ---------------- */
@@ -181,6 +190,18 @@ class Ui {
         const c = this.comp(name);
         if (c && !row && (!cell || cell === 'Text') && this.display) this.display.label(name, text);   // slim bar mirrors it
         return c ? this._try('text ' + name, this._cnText.set(c, name, row || 0, cell || 'Text', text)) : Promise.resolve();
+    }
+    /**
+     * A line of plain text in a label or title of the HMI's own page (iDrive 8: the host page's status lines, read
+     * when the drawn screen does not come). ASCII only; written when it changed; a component that is not there is quiet.
+     */
+    info(name, text) {
+        const c = this.rhmi && this.rhmi.getByName(name);
+        const s = String(text).replace(/[^\x20-\x7e]/g, '?').slice(0, 230);
+        this._info = this._info || Object.create(null);
+        if (!c || this._info[name] === s) return Promise.resolve();
+        this._info[name] = s;
+        return this._try('info ' + name, Promise.resolve().then(() => c.setValue(0, 'Text', s, 'Text')));
     }
     /** Set several cells of one row: ui.cells('LIST', 3, { Text1stCol: 'a', Text2ndCol: 'b' }) */
     cells(name, row, obj) {
@@ -520,6 +541,40 @@ function widgetText(s) {
     return String(s).replace(/°/g, '').replace(/[^\x20-\x7e]/g, '');
 }
 
+/*
+ * iDrive 8: the SDK is up when its 'initialized' event came (what the Store's app and IterioDev's host go on from) or
+ * when start()'s promise resolved (what a plain app awaits), whichever is first. A start() that resolves before the
+ * app's RHMI application is there waits for the event or the screens, 8 s at most.
+ */
+function startId8(app) {
+    return new Promise((resolve, reject) => {
+        let done = false, wait = null;
+        const finish = (how) => {
+            if (done) return;
+            done = true;
+            clearInterval(wait);
+            log.info('SDK started (' + how + (app.rhmiApplication ? '' : ', no RHMI application') + ')');
+            resolve();
+        };
+        app.once('initialized', () => finish('initialized event'));
+        let p;
+        try { p = app.start(); } catch (e) { reject(e); return; }
+        Promise.resolve(p).then(() => {
+            if (done) return;
+            if (app.rhmiApplication) { finish('start() returned'); return; }
+            const t0 = Date.now();
+            wait = setInterval(() => {
+                if (app.rhmiApplication) finish('start() returned, the screens a moment later');
+                else if (Date.now() - t0 >= 8000) finish('start() returned');
+            }, 250);
+        }, (e) => {
+            if (done) { log.warn('start(): ' + (e && e.stack || e)); return; }
+            done = true;
+            reject(e);
+        });
+    });
+}
+
 /* ---------------- run ---------------- */
 async function run(impl) {
     try { return await runInner(impl); } catch (e) {
@@ -540,17 +595,29 @@ async function runInner(impl) {
     // lifecycle as BMW's M Laptimer does it: report the status (life.js) as soon as the app
     // status channel is up, report HMI visibility, and exit when MainApp asks us to shut down
     // (iDrive 8: the status is reported where the SDK can; a unit whose SDK refuses it is not asked again)
-    const life = new Life(app, log, { once: ID8 });
+    // (iDrive 8: ACTIVE from the start and nothing else, as the Store and IterioDev's apps run there: their host reports
+    // no hide and no "HMI visible" on that SDK)
+    const life = new Life(app, log, { once: ID8, activeOnly: ID8 });
     const active = () => life.sync(true);
     app.on('appStatusProxyReady', active);
-    app.on('shutdown', () => { log.info('shutdown requested by MainApp'); setTimeout(() => process.exit(0), 200); });
+    // the SDK's own 'error' event: without a listener Node throws it, and the app would end on a failure the SDK
+    // only meant to report (the Store and IterioDev's host listen too)
+    app.on('error', (e) => log.warn('OnlineApp error: ' + (e && e.stack || e)));
+    app.on('shutdown', (reason) => {
+        log.info('shutdown requested by MainApp' + (reason ? ' (' + reason + ')' : ''));
+        // iDrive 8: the app's bundles go first, as the proven host ends (at most 1.5 s)
+        const bundles = ID8 && typeof app.destroyBundles === 'function'
+            ? Promise.race([Promise.resolve().then(() => app.destroyBundles()).catch((e) => log.info('destroyBundles: ' + e)), new Promise((res) => setTimeout(res, 1500))])
+            : new Promise((res) => setTimeout(res, 200));
+        bundles.then(() => process.exit(0));
+    });
     // home-screen widget: MainApp hands it over (now or whenever one is placed)
     const widget = new Widget(SPEC.startWidget);
     if (SPEC.startWidget) {
         patchStartWidgetEvents(app);
         app.on('startWidgetInitialized', (rhmiApp) => { log.info('widget initialized'); widget.attach(rhmiApp); life.setWidget(true); });
     }
-    await app.start();
+    if (ID8) await startId8(app); else await app.start();
     active();
     if (!app.rhmiApplication) {
         // The SDK did not create the app's screens: nothing can be shown. Stay up (idle) rather than throw: a
@@ -559,9 +626,12 @@ async function runInner(impl) {
             'Causes: the SDK config has rhmiLoadingEnabled off (an SDK extracted from a newer donor app; build.py ' +
             'turns it on - rebuild the app), a CONFIG_STATE start, or the HMI could not load the app\'s resources ' +
             '(see the SDK_ lines above). Idle until MainApp stops it.');
+        // (iDrive 8: the start is still answered, as the proven host does for a start without a screen)
+        if (ID8) await Promise.resolve().then(() => app.initialized()).catch((e) => log.warn('initialized: ' + e));
         return;
     }
     const ui = new Ui(app);
+    ui.lastFatal = () => lastFatal;
     const settings = new Settings(SPEC.settings);
     const display = new Display(ui, log, SPEC, settings, () => themes.theme(settings.get('theme')));
     ui.display = display;
@@ -601,6 +671,8 @@ async function runInner(impl) {
         onBack(fn) { display.onBack = fn; },
         /** focus(key): the controller onto the page's target key (cv.target), e.g. the tile a Back returns to. */
         focus(key) { display.focusPage(key); },
+        /** status(text): the app's own line among the page's status lines (iDrive 8: what its service says; display.js). */
+        status(text) { display.appStatus = String(text); },
         /** Show a sheet (sheet.js) over the page; false where it can't be (software path, other renderers). */
         sheet(sh) { return display.openSheet(sh); },
         /** hideButton(id, hide = true): leave bar button id out where the kit runs the screen (its job is on the page there); false puts it back. */
@@ -684,47 +756,52 @@ async function runInner(impl) {
     const tracked = (SPEC.screens || []).concat(SPEC.settings && SPEC.settings.length && !ID8 ? [{ name: 'SETTINGS' }] : []);
     // iDrive 8: RHMI values come as booleans, or as 1 / 0 or strings (the MGU Store's isTrue, on both HMIs)
     const yes = (v) => (ID8 ? v === true || v === 'true' || v === 1 || v === '1' : !!v);
-    let sawFront = false;            // (iDrive 8) one of our screens has been shown: a stack without the app is a leave
+    let sawFront = false;            // (iDrive 8) one of our screens has been shown
+    // (iDrive 8) what the HMI last said, for the page's status lines and the log; fallback: an HMI that sends no
+    // visible events, where the stack decides instead
+    const hmi = { visible: null, focus: null, stack: '-', events: 0, opened: 0, fallback: false, start: '?', entry: '?', open: 'not asked' };
+    ui.hmi = hmi;
     tracked.forEach((s) => {
         const st = ui.comp(s.name);
         if (st && st.on) st.on('visible', (ev) => {
             const on = yes(ev && ev.visible);
-            if (ID8) logOnce('visible ' + s.name + ' ' + JSON.stringify(ev && ev.visible));
+            if (ID8) {
+                logOnce('visible ' + s.name + ' ' + JSON.stringify(ev)); hmi.visible = on; hmi.events++;
+                if (hmi.fallback) { hmi.fallback = false; log.info('hmi: visible events after all - they decide again'); }
+            }
             if (on) { sawFront = true; ui._raise(s.name); }
             ui._setVisible(s.name, on);
         });
         // a popup over the screen (options, warnings, calls) takes its focus: the display hides
         // the GPU overlay meanwhile, so the popup is never covered
-        if (st && st.on) st.on('focus', (ev) => ui._setFocus(s.name, ID8 ? !(ev && 'focus' in ev) || yes(ev.focus) : !(ev && ev.focus === false)));
+        if (st && st.on) st.on('focus', (ev) => {
+            const on = ID8 ? !(ev && typeof ev === 'object' && 'focus' in ev) || yes(ev.focus) : !(ev && ev.focus === false);
+            if (ID8) { logOnce('focus ' + s.name + ' ' + JSON.stringify(ev)); hmi.focus = on; }
+            ui._setFocus(s.name, on);
+        });
     });
     // (iDrive 8) the first few raw events in the app's log: what this HMI sends, for a report from the car
     const seenLog = {};
     function logOnce(line) { const k = line.replace(/[0-9]+/g, '#'); if ((seenLog[k] = (seenLog[k] || 0) + 1) <= 3) log.info('hmi: ' + line); }
     /*
-     * iDrive 8: the stack decides only what its keys say for sure, as the MGU Store's app and IterioDev's iDrive 8
-     * apps read it: ROOT_APP there = the app is in front (a screen it lists, by id or name in any form, is shown);
-     * keys without ROOT_APP once a screen was shown = the user left the app (every screen hidden); no keys: nothing.
-     * Which screen shows is otherwise the screens' own visible events: iDrive 7's reading (the stack's ids against
-     * getId()) hid the page on iDrive 8, whose stack doesn't list it that way - the grey page of 0.4.0.
+     * iDrive 8: which screen shows is the screens' own visible events, as IterioDev's car-tested apps and the Store's
+     * drawn screens follow them. The stack does not hide the screen (0.4.0 hid the page by iDrive 7's reading of the
+     * stack, 0.4.1 still whenever a stack came without ROOT_APP) and does not show it; only on an HMI that sends no
+     * visible events at all (hmi.fallback: none ever, 5 s after the page opened) the stack is all there is:
+     * ROOT_APP = the app is in front, its screen shows; keys without it = the user left.
      */
     function stackId8(stack) {
         const isMap = stack instanceof Map;
         const keys = isMap ? Array.from(stack.keys()) : stack && typeof stack === 'object' ? Object.keys(stack) : [];
-        logOnce('stack ' + JSON.stringify(isMap ? Array.from(stack.entries()) : stack).slice(0, 300));
+        let said = '';
+        try { said = JSON.stringify(isMap ? Array.from(stack.entries()) : stack).slice(0, 300); } catch (e) { said = String(stack); }
+        logOnce('stack ' + said);
         if (!keys.length) return;
         const root = keys.indexOf('ROOT_APP') >= 0;
-        Promise.resolve().then(() => (root ? app.registerHmiVisible() : app.unregisterHmiVisible())).catch((e) => log.warn('hmi visible: ' + e));
-        if (!root) {
-            if (sawFront) tracked.forEach((s) => ui._setVisible(s.name, false));
-            return;
-        }
-        const list = [].concat(isMap ? stack.get('ROOT_APP') || [] : stack.ROOT_APP || []);
-        const names = list.map((x) => String(x && typeof x === 'object' ? (x.id !== undefined ? x.id : x.name !== undefined ? x.name : '') : x));
+        hmi.stack = root ? 'ROOT_APP' : String(keys.slice(0, 3).join(',')).slice(0, 30);
+        if (!hmi.fallback) return;
         tracked.forEach((s) => {
-            const st = ui.comp(s.name);
-            const ids = [s.name, st && st.getId ? String(st.getId()) : null, SPEC.stateIds && SPEC.stateIds[s.name] != null ? String(SPEC.stateIds[s.name]) : null];
-            if (names.some((n) => ids.indexOf(n) >= 0)) { sawFront = true; ui._raise(s.name); ui._setVisible(s.name, true); }
-            if (st && ui.isVisible(s.name)) ui._setFocus(s.name, true);
+            if (root) { sawFront = true; ui._raise(s.name); ui._setVisible(s.name, true); ui._setFocus(s.name, true); } else if (sawFront) ui._setVisible(s.name, false);
         });
     }
     // the status for MainApp follows our screens' visibility, as the Store's does: behind Home the HMI
@@ -737,9 +814,15 @@ async function runInner(impl) {
         if (anyShown()) { life.setShown(true); return; }
         hideTimer = setTimeout(() => { if (!anyShown()) life.setShown(false); }, 800);
     });
-    app.on('changeVisibility', (d) => { if (d && d.visible === false) { clearTimeout(hideTimer); life.setShown(false); } });
+    app.on('changeVisibility', (d) => {
+        if (!(d && d.visible === false)) return;
+        clearTimeout(hideTimer);
+        life.setShown(false);
+        // (iDrive 8: the manager says the app left the screen - the Store's app takes its screens as hidden then)
+        if (ID8) { log.info('hmi: changeVisibility false'); tracked.forEach((s) => ui._setVisible(s.name, false)); }
+    });
     ui.rhmi.on('applicationStackChanged', (stack) => {
-        if (ID8) { stackId8(stack); return; }
+        if (ID8) { try { stackId8(stack); } catch (e) { log.warn('stack: ' + e); } return; }
         const shown = stack && Object.keys(stack).length > 0 && ('ROOT_APP' in stack);
         Promise.resolve().then(() => (shown ? app.registerHmiVisible() : app.unregisterHmiVisible()))
             .catch((e) => log.warn('hmi visible: ' + e));
@@ -765,47 +848,76 @@ async function runInner(impl) {
     // entry points (tiles): map them to the main screen once, up front, like
     // BMW's own apps do; a tap then only opens the mapped state
     const mainName = (SPEC.screens && SPEC.screens[0] && SPEC.screens[0].name) || 'MAIN';
+    const errText = (e) => String(e && e.message ? e.message : e) + (e && typeof e === 'object' && !(e instanceof Error) ? ' ' + JSON.stringify(e) : '');
     let entryUuids = [];
     try {
         const appDesc = JSON.parse(fs.readFileSync(path.join(APP_ROOT, 'rhmiData', 'application.json'), 'utf8'));
         entryUuids = ((appDesc.application && appDesc.application.entryPoints) || []).map((e) => e.uuid);
     } catch (e) { log.warn('no rhmiData/application.json: ' + e); }
+    // (iDrive 8: or as the SDK read it, where the installed files lie elsewhere)
+    if (ID8 && !entryUuids.length) {
+        try { entryUuids = ((app.appDescription && app.appDescription.application && app.appDescription.application.entryPoints) || []).map((e) => e.uuid); } catch (e) { /* none */ }
+    }
     const mainState = ui.comp(mainName);
+    if (ID8 && !mainState) log.error('iDrive 8: the HMI has no page ' + mainName + ' of this app - nothing can open');
     const mapped = {};
-    // iDrive 8: the host page's resources first, then the tile the manager hands over made usable as the MGU Store and
-    // IterioDev's iDrive 8 apps do it (init, mapped to the page, its text and icon, ENABLED). Without the SDK's entry
-    // point list (iDrive 7's SDK) the plain mapping below does it, as before.
+    // iDrive 8: the host page's resources first, then the tile the manager hands over made usable as the MGU Store's
+    // app does it (init, mapped to the page, ENABLED). Its name and icon stay the manager's own: set from the app's
+    // bundles they go with the app's process, and the tile is left blank once the app is stopped. Each step is tried
+    // on its own, so one the HMI refuses does not leave the tile disabled. Without the SDK's entry point list
+    // (iDrive 7's SDK) the plain mapping below does it, as before.
     if (ID8) {
-        await step('host page resources', mainState && mainState.updateResources ? mainState.updateResources() : null, 4000);
-        const eps = typeof app.getEntryPoints === 'function' ? app.getEntryPoints() || [] : [];
-        const ours = eps.find((ep) => ep && ep.getDescription && entryUuids.indexOf(ep.getDescription().uuid) >= 0);
+        await step('host page resources', mainState && mainState.updateResources ? Promise.resolve().then(() => mainState.updateResources()) : null, 4000);
+        let eps = [];
+        try { eps = typeof app.getEntryPoints === 'function' ? app.getEntryPoints() || [] : []; } catch (e) { log.warn('entry points: ' + errText(e)); }
+        const uuidOf = (ep) => { try { return ep.getDescription().uuid; } catch (e) { return null; } };
+        const ours = eps.find((ep) => ep && entryUuids.indexOf(uuidOf(ep)) >= 0);
         if (ours) {
-            const d = ours.getDescription();
-            await step('entry point ' + d.uuid, Promise.resolve(ours.init())
-                .then(() => ui.rhmi.mapEntryState(d.uuid, mainState)).then(() => { mapped[d.uuid] = true; })
-                .then(() => Promise.resolve(ours.entryPoint && ours.entryPoint.setText(d.textId))
-                    .then(() => (d.icon && ours.entryPoint ? ours.entryPoint.setIcon(d.icon) : null))
-                    .catch((e) => log.warn('entry point text / icon: ' + e)))
-                .then(() => ours.setAvailability('ENABLED')), 4000);
-        } else log.warn('iDrive 8: no entry point handed over by the manager (the tile may do nothing)');
+            const uuid = uuidOf(ours);
+            const soft = (what, fn) => Promise.resolve().then(fn).then(() => true, (e) => { log.warn('entry point ' + what + ': ' + errText(e)); return false; });
+            await step('entry point ' + uuid, (async () => {
+                const init = await soft('init', () => ours.init());
+                if (await soft('map', () => ui.rhmi.mapEntryState(uuid, mainState))) mapped[uuid] = true;
+                const on = await soft('enable', () => ours.setAvailability('ENABLED'));
+                hmi.entry = (init ? 'init ' : 'init failed ') + (mapped[uuid] ? 'mapped ' : 'not mapped ') + (on ? 'enabled' : 'not enabled');
+            })(), 6000);
+        } else { hmi.entry = 'none handed over'; log.warn('iDrive 8: no entry point handed over by the manager (' + eps.length + ' there, ' + entryUuids.length + ' described)'); }
     }
     await Promise.all(entryUuids.filter((uuid) => !mapped[uuid]).map((uuid) => ui.rhmi.mapEntryState(uuid, mainState)
         .then(() => { mapped[uuid] = true; log.info('mapped entry ' + uuid + ' -> ' + mainName); })
         .catch((e) => log.error('map entry state', e))));
-    let opening = null;
+    let opening = null, openedOnce = false;
     // tries: right after a tap started the app the HMI can still refuse the state (INVALID_UUID /
     // INVALID_COMPONENTID) - then it is asked again, 0.8 s apart, instead of needing a second tap
+    // (iDrive 8: asked again after any refusal, and opened even when the mapping was refused: the manager's own may hold)
     const openEntry = (uuid, tries) => {
         if (opening) return opening;   // MainApp can send the same tap twice
+        openedOnce = true;
         let again = false;
-        const map = mapped[uuid] ? Promise.resolve() : ui.rhmi.mapEntryState(uuid, mainState).then(() => { mapped[uuid] = true; });
+        const map0 = mapped[uuid] ? Promise.resolve() : Promise.resolve().then(() => ui.rhmi.mapEntryState(uuid, mainState)).then(() => { mapped[uuid] = true; });
+        const map = ID8 ? map0.catch((e) => log.warn('map entry state: ' + errText(e))) : map0;
         opening = map
-            .then(() => (mainState && mainState.updateResources ? mainState.updateResources().catch(() => {}) : null))
+            .then(() => (mainState && mainState.updateResources ? Promise.resolve().then(() => mainState.updateResources()).catch(() => {}) : null))
             .then(() => ui.rhmi.openEntryState(uuid))
-            .then(() => { sawFront = true; ui._raise(mainName); ui._setVisible(mainName, true); })
+            .then(() => {
+                sawFront = true; ui._raise(mainName); ui._setVisible(mainName, true);
+                if (!ID8) return;
+                log.info('entry state opened');
+                hmi.opened = Date.now(); hmi.open = 'opened';
+                // an HMI that has never said "visible", 5 s after it opened the page: the stack decides until it
+                // does (stackId8)
+                setTimeout(() => {
+                    if (hmi.events || hmi.fallback) return;
+                    hmi.fallback = true;
+                    log.warn('hmi: no visible event 5 s after the page opened - the screen follows the stack until one comes');
+                }, 5000);
+            })
             .catch((e) => {
-                if ((tries || 1) > 1 && /INVALID/.test(String(e && e.message ? e.message : e) + ' ' + JSON.stringify(e || {}))) again = true;
-                else log.error('open entry state', e);
+                if ((tries || 1) > 1 && (ID8 || /INVALID/.test(String(e && e.message ? e.message : e) + ' ' + JSON.stringify(e || {})))) {
+                    again = true;
+                    if (ID8) log.warn('open entry state: ' + errText(e) + ' - asked again');
+                } else log.error('open entry state', e);
+                if (ID8) hmi.open = 'refused (' + errText(e).slice(0, 60) + ')';
             })
             .then(() => {
                 opening = null;
@@ -817,7 +929,7 @@ async function runInner(impl) {
     widget.onTap(() => { if (entryUuids[0]) openEntry(entryUuids[0]); });
     app.on('entryPointExecute', (uuid, reason, name) => {
         log.info('entry point ' + name + ' (' + reason + ')');
-        openEntry(uuid);
+        openEntry(uuid, ID8 ? 4 : undefined);
     });
 
     // push every screen's and pop-up's rows to the HMI once (BMW apps do this via
@@ -831,12 +943,28 @@ async function runInner(impl) {
         .map((st) => st.updateResources())), 4000);
     await step('settings screen', wireSettings(ctx), 3000);
     if (impl && impl.start) await step('app start', Promise.resolve().then(() => impl.start(ctx)), 5000);
+    // (iDrive 8: the start reason as the Store reads it - the SDK there may keep it in its visibility data)
+    const startReason = () => {
+        let d = null;
+        try { d = typeof app.getVisibilityData === 'function' ? app.getVisibilityData() : null; } catch (e) { /* not on this SDK */ }
+        return String((d && d.reason) || app.startReason);
+    };
+    hmi.start = ID8 ? startReason() : String(app.startReason);
+    if (ID8) active();                       // ACTIVE before initialized(), as the proven host reports it
     await app.initialized();
-    log.info('initialized (start reason ' + app.startReason + ')');
+    log.info('initialized (start reason ' + hmi.start + ')');
     // launched by a tile tap / bookmark: the execute event came before we
     // listened, so open the screen ourselves (M Laptimer does the same)
-    const lastEntry = app.getLastExecutedEntryPointUuid && app.getLastExecutedEntryPointUuid();
-    if (lastEntry && ['ENTRY_POINT', 'BOOKMARK', 'LUM'].indexOf(String(app.startReason)) >= 0) openEntry(lastEntry, 6);
+    let lastEntry = null;
+    try { lastEntry = app.getLastExecutedEntryPointUuid && app.getLastExecutedEntryPointUuid(); } catch (e) { log.warn('last entry point: ' + e); }
+    if (ID8) {
+        // as the Store's app and IterioDev's host: the entry point the app was started with is opened, whatever the
+        // SDK calls the start. A start for the tile that names none (and sends no execute event either): our own.
+        if (lastEntry) openEntry(lastEntry, 6);
+        else if (['ENTRY_POINT', 'BOOKMARK', 'LUM'].indexOf(hmi.start) >= 0 && entryUuids[0]) {
+            setTimeout(() => { if (!openedOnce) { log.warn('started for the tile without an entry point named: opening our own'); openEntry(entryUuids[0], 6); } }, 1500);
+        }
+    } else if (lastEntry && ['ENTRY_POINT', 'BOOKMARK', 'LUM'].indexOf(String(app.startReason)) >= 0) openEntry(lastEntry, 6);
     process.on('unhandledRejection', (e) => log.error('unhandled', e));
     return ctx;
 }

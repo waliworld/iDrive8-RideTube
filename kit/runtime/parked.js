@@ -27,7 +27,7 @@ function watch(ctx, log, opts) {
             const k = v && v.speedVehicleCentreOfGravity;
             if (typeof k === 'number' && k !== 65535) { speed = k * 0.015625; at = now(); }
         },
-    }, log, { pollMs: 2000 }).then((s) => log && log.info('parked check: speed ' + (s.error ? 'error: ' + s.error : 'subscribed')));
+    }, log, { pollMs: 2000 }).then((s) => log && log.info('parked check: speed ' + (s.error ? 'error: ' + s.error : s.proxy ? 'subscribed' : 'connecting')));
     return {
         moving: () => (speed === null || (strict && now() - at > STALE_MS) ? strict : speed > MAX_KMH),
         speed: () => speed,

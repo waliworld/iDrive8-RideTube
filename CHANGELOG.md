@@ -1,5 +1,30 @@
 # Changelog
 
+## App 0.4.2: iDrive 8, the tile opens nothing / the page stays grey
+
+Still reported from an iDrive 8 car: the tile is tapped, the screen goes grey, RideTube never shows. Not confirmed
+on a car yet; each point below is a way the iDrive 8 start differed from the apps that are known to run there (the
+MGU Store's app, IterioDev's apps), and each fails in the new tests on 0.4.1.
+
+- The app said INACTIVE to the app manager once it took its page for hidden, and "HMI not visible" with every screen
+  stack that did not name it. On iDrive 8 it now reports ACTIVE at the start and nothing else, as those apps do.
+- A screen stack without `ROOT_APP` no longer hides the screen (0.4.1 still did). The page's own visible event
+  decides; the stack only on an HMI that sends no visible events at all.
+- The SDK's `error` event has a listener (without one Node ends the process), a focus event that is a bare value
+  no longer throws, and an uncaught error is logged and shown instead of ending the app.
+- The start goes on from the SDK's `initialized` event or `start()`, whichever comes first; the page is opened for
+  the entry point the app was started with whatever the SDK calls the start reason, asked again after any refusal,
+  and opened even when the mapping was refused.
+- The tile keeps the manager's own name and icon (set from the app's bundles they go with the app's process, and
+  the tile is left blank once the app stops). Each step of making it usable is tried on its own.
+- The car's speed and battery are read through the SDK's typed proxies on iDrive 8, not the raw SOME/IP binding
+  with iDrive 7's interface files; the manifest names those interfaces whole, as IterioDev's iDrive 8 apps do.
+- **The page says what is wrong.** The HMI's own page under RideTube's screen now has four status lines (the
+  version and how it was started, the page, the renderer, the service) and the reason in its title. While
+  RideTube draws they are covered; when it does not, a photo of the screen says why.
+- The string bundle is the page's own texts only (no dynamic slots).
+- iDrive 7: unchanged but the `error` listener.
+
 ## App 0.4.1: iDrive 8 grey page
 
 - iDrive 8: the page stayed grey (the HMI's empty page, RideTube's screen never drawn over it). The kit read the HMI's

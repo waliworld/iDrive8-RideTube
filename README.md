@@ -4,9 +4,11 @@ RideTube, the unofficial YouTube client for BMW head units, **ported to iDrive 8
 [JustAnotherPU/ridetube](https://github.com/JustAnotherPU/ridetube) (iDrive 7), GPL-3.0-or-later; the port adds an
 iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.0) and Node.js 22 marked for iDrive 8.
 
-> **Beta: not yet run on an iDrive 8 car.** It is built and tested on a computer against iDrive 8's 2880 x 960 screen,
-> and its packages install on the MGU Store's simulated iDrive 8 head unit. What may need a fix on the car (sound
-> route, GPU decoder) is under "iDrive 8" below, with how to tell from the logs. Reports welcome in the issues.
+> **Beta: not yet working on an iDrive 8 car.** It is built and tested on a computer against iDrive 8's 2880 x 960
+> screen and a simulated iDrive 8 HMI, and its packages install on the MGU Store's simulated iDrive 8 head unit. The
+> first report from a car (0.4.0): the tile opened a grey page and RideTube never showed. 0.4.2 changes the start to
+> match the apps known to run on iDrive 8 and makes the page say what is wrong; it is not confirmed on a car yet.
+> **If the screen stays grey, photograph it**: the lines on the page say why. Reports welcome in the issues.
 
 ## Install on an iDrive 8 car
 
@@ -120,11 +122,14 @@ What may need a fix on the car, and how to tell (`journalctl -u jap-ridetube-d`,
   `/var/opt/jap-ridetube-d/state/audio.json` (`native/jap-ridetube-d/README.md`) and restart the service.
 - **The picture.** ytdec decodes on the Intel GPU with the head unit's Media SDK (`libmfxhw64`). The service logs at
   start whether the head unit has it. Without it the sound plays and the picture shows "video failed, audio only".
-- **The tile.** The app registers its tile as the MGU Store does on iDrive 8. If the tile does nothing, the app's
-  log says `no entry point handed over by the manager`.
-- **An empty page.** If RideTube's screen can't be drawn, the page's title says why after a few seconds
-  (`RideTube - needs the GPU renderer mgu-render`, `... the renderer shows another app`, ...). The app's log has the
-  first events the HMI sent (`hmi: visible ...`, `hmi: stack ...`): send them along with a report.
+- **The tile.** The app makes its tile usable as the MGU Store's app does on iDrive 8 (the name and icon stay the
+  manager's). If the tile does nothing, the app's log says why (`entry point ...`, `open entry state ...`).
+- **A grey page.** The HMI's own page under RideTube's screen has four status lines and says the reason in its
+  title: the version and how the app was started (`start: ...`, `tile: ...`), the page (`visible`, `focus`,
+  `stack`), the renderer (`connected`, `in front`, `on screen`, `frames`) and the service. RideTube's screen covers
+  them while it draws, so a page you can read them on is one the picture did not reach: a photo of it is the report.
+  A page with only `Starting...` means the app's code did not run. The app's log has the first events the HMI sent
+  (`hmi: visible ...`, `hmi: focus ...`, `hmi: stack ...`).
 
 ## Settings
 
