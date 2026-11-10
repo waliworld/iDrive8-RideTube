@@ -1,0 +1,53 @@
+# Builds the MGU Store release of this repository (tools/release_id8.sh) and publishes it as the GitHub release
+# tagged "catalog", which the Store reads (source waliworld/iDrive8-RideTube, Releases). Runs when main changes in
+# what goes into the release, or by hand (Actions, "Release (MGU Store catalog)", Run workflow).
+name: Release (MGU Store catalog)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/**'
+      - 'kit/**'
+      - 'native/jap-ridetube-d/**'
+      - 'tools/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: catalog-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test tools (ffmpeg and jpegtran make the thumbnail test's JPEGs)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg libjpeg-turbo-progs file
+
+      - name: The MGU Store (its deploy/hu packs the tool kits)
+        run: git clone --depth 1 https://github.com/robertnisipeanu/mgu-store "$RUNNER_TEMP/mgu-store"
+
+      - name: Build the release (dist/release/)
+        run: MGU_STORE="$RUNNER_TEMP/mgu-store" tools/release_id8.sh
+
+      - name: Publish it as the release tagged "catalog"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view catalog >/dev/null 2>&1; then
+            gh release create catalog --target "$GITHUB_SHA" \
+              --title "MGU Store catalog (RideTube for iDrive 8, beta)" \
+              --notes "The MGU Store reads catalog.json here. In the Store: Settings, Add source, \`waliworld/iDrive8-RideTube\`, Releases. Then install RideTube and restart the head unit. Rebuilt by the Release workflow on every change to main."
+          fi
+          gh release upload catalog dist/release/* --clobber
+          echo "published:"; ls -l dist/release
