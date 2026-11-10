@@ -13,7 +13,7 @@ The RHMI layout (application.xml + uiDescription.json) is GENERATED from the
 "screens" + "settings" in app.json, using only widget templates that BMW's own
 apps use on this firmware (see reference/rhmi-widget-cells.md).
 """
-import gzip, json, os, re, shutil, sys, tarfile, tempfile, uuid
+import gzip, io, json, os, re, shutil, sys, tarfile, tempfile, uuid
 from xml.sax.saxutils import escape
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pack_data  # noqa: E402
@@ -489,6 +489,121 @@ def build_start_widget(spec, app_id, icon_src, out):
     return {'component': comp, 'layout': ui['containers']['500']['components'][str(WIDGET_COMPONENT_ID)]['cells']['Widget']['value']}
 
 
+# iDrive 8: what an app may reach over joynr there (permissions.json), by domain and interface: the entries of the MGU
+# Store's own app and of the iDrive 8 apps that run beside it. iDrive 7's table (kit/platform/permissions.json) names
+# the gateway interfaces of that head unit.
+ID8_ACCESS = [
+    ('hmi.entrypoint2', 'de/bmw/infotainment/hmi/entrypoint2/EntryPointManager2'),
+    ('hmi.resourcemanagement2', 'de/bmw/infotainment/hmi/resourcemanagement2/ResourceManager2'),
+    ('hmi.resourcemanagement2', 'de/bmw/infotainment/hmi/resourcemanagement2/StringBundle2'),
+    ('hmi.usecasemanagement', 'de/bmw/infotainment/hmi/usecasemanagement/UseCaseContext'),
+    ('telematic.oapcontroller', 'de/bmw/infotainment/telematic/oapcontroller/OAPController'),
+    ('de.bmw.infotainment.telematic.oap.oapcontroller', 'de/bmw/infotainment/telematic/oapcontroller/OAPController'),
+    ('de.bmw.infotainment.telematic.oap.appStatus_${APPNAME}', 'de/bmw/infotainment/telematic/oap/appstatus/AppStatus'),
+    ('de.bmw.infotainment.telematic.oap.appstart', 'de/bmw/infotainment/telematic/oap/appstart/AppStart'),
+    ('de.bmw.infotainment.telematic.oap.privateEntryPoint_${APPNAME}',
+     'de/bmw/infotainment/telematic/oap/privateentrypoint/PrivateEntryPoint'),
+]
+ID8_REGISTRATION = [('de.bmw.infotainment.telematic.oap.heartbeat_${APPNAME}',
+                     'de/bmw/infotainment/telematic/oap/heartbeat/HeartbeatMonitor')]
+# the require names the head unit's linker resolves in an app already on the car (kit/id8/boot.js asks for these three)
+ID8_SDK = ['oap-sdk/src/core/OnlineApp.js', 'oap-sdk/src/logging/logging', 'oap-sdk/src/someip/someipBuilders']
+# where the kit and the app's own code go in the iDrive 8 package (kit/id8/boot.js RUNTIME)
+ID8_RUNTIME = 'app'
+# a package file that asks for the SDK by a require call: the MGU Store's deploy tool gives no SDK module on iDrive 8,
+# and refuses a built package that still has one (its tools/oap_link.js needsSdk)
+SDK_CALL = re.compile(r"""require\(\s*(['"])oap-sdk\1\s*\)""")
+
+
+def permissions_id8():
+    def entry(kind, domain, iface):
+        e = {'_typeName': 'joynr.infrastructure.DacTypes.Master%sControlEntry' % kind, 'uid': '${APPNAME}',
+             'domain': domain, 'interfaceName': iface, 'defaultRequiredTrustLevel': 'HIGH',
+             'possibleRequiredTrustLevels': [], 'defaultRequiredControlEntryChangeTrustLevel': 'HIGH',
+             'possibleRequiredControlEntryChangeTrustLevels': []}
+        if kind == 'Access':
+            e.update({'operation': '*', 'defaultConsumerPermission': 'YES', 'possibleConsumerPermissions': []})
+        else:
+            e.update({'defaultProviderPermission': 'YES', 'possibleProviderPermissions': []})
+        return e
+    return {'masterAccessTable': [entry('Access', d, i) for d, i in ID8_ACCESS], 'mediatorAccessTable': [],
+            'ownerAccessTable': [], 'masterRegistrationTable': [entry('Registration', d, i) for d, i in ID8_REGISTRATION],
+            'mediatorRegistrationTable': [], 'ownerRegistrationTable': [], 'domainRoleTable': []}
+
+
+def source_package_id8(spec, stage, pkg):
+    """iDrive 8: the app as a source package (mgu-app.json), the only kind of package the MGU Store's deploy tool
+    gives BMW's oap-sdk on iDrive 8: it links the modules mgu-app.json lists against the SDK of an app already on the
+    car. One module is linked, the kit's entry module (kit/id8/boot.js); the kit and the app's code are plain files of
+    the package (ID8_RUNTIME), with kit/id8/sdk.js as the kit's sdk.js. The layout is the one of the Store's own app
+    (github.com/robertnisipeanu/mgu-store docs/PUBLISHING.md, "Source packages"):
+
+        mgu-app.json                 schema 1: id, version, tree, modules, sdk
+        src/boot.js                  the entry module
+        <id>@<version>/              the tree: package.json (main javascript/runner.js: the head unit puts the entry
+                                     point of the app it takes the SDK from there, and the linked bundle beside it as
+                                     javascript/app.js), manifest.json, permissions.json, npm-shrinkwrap.json, rhmiData/
+                                     (package format), app/ (the kit and the app), the licences
+
+    -> dist/src/<id>/ and dist/src/<id>@<version>.tgz (the Store's artifact; "build": "unit" in the catalog)."""
+    app_id, ver = spec['id'], spec['version']
+    src = os.path.join(stage, 'source')
+    out = os.path.join(DIST, 'src', app_id)
+    shutil.rmtree(out, ignore_errors=True)
+    tree = os.path.join(out, '%s@%s' % (app_id, ver))
+    os.makedirs(os.path.join(out, 'src'))
+    os.makedirs(tree)
+    shutil.copy(os.path.join(KIT, 'id8', 'boot.js'), os.path.join(out, 'src', 'boot.js'))
+    # the kit and the app: the staged javascript/ (app.js is the bundle's name in the package: the app's is main.js)
+    run = os.path.join(tree, ID8_RUNTIME)
+    shutil.copytree(os.path.join(src, 'javascript'), run)
+    os.rename(os.path.join(run, 'app.js'), os.path.join(run, 'main.js'))
+    shutil.copy(os.path.join(KIT, 'id8', 'sdk.js'), os.path.join(run, 'kit', 'sdk.js'))
+    shutil.copytree(os.path.join(src, 'rhmiData'), os.path.join(tree, 'rhmiData'))
+    shutil.copy(os.path.join(src, 'manifest.json'), os.path.join(tree, 'manifest.json'))
+    files = ['javascript', 'manifest.json', 'package.json', 'permissions.json', 'npm-shrinkwrap.json', 'rhmiData', ID8_RUNTIME]
+    for name in ('LICENSE', 'LICENSE.kit', 'THIRD_PARTY_LICENSES'):
+        if os.path.exists(os.path.join(src, name)):
+            shutil.copy(os.path.join(src, name), os.path.join(tree, name))
+            files.append(name)
+    json.dump(permissions_id8(), open(os.path.join(tree, 'permissions.json'), 'w', encoding='utf-8', newline='\n'), indent=2)
+    json.dump({'name': app_id, 'version': ver, 'lockfileVersion': 1, 'requires': True, 'dependencies': {}},
+              open(os.path.join(tree, 'npm-shrinkwrap.json'), 'w', encoding='utf-8', newline='\n'), indent=2)
+    pkg8 = {'name': app_id, 'version': ver, 'description': pkg['description'], 'private': False,
+            'main': 'javascript/runner.js', 'mguHmi': ['ID8'], 'oapAppSettings': pkg['oapAppSettings'], 'files': files,
+            'dependencies': {'oap-sdk': '24.10.2'}, 'engines': pkg['engines'], 'author': pkg['author'],
+            'license': pkg['license'], 'mguLocalOnly': True, 'productName': spec['title']}
+    if pkg.get('mguAppStartType'):
+        pkg8['mguAppStartType'] = pkg['mguAppStartType']
+    json.dump(pkg8, open(os.path.join(tree, 'package.json'), 'w', encoding='utf-8', newline='\n'), indent=2)
+    json.dump({'schema': 1, 'id': app_id, 'version': ver, 'tree': os.path.basename(tree), 'modules': ['src/boot.js'], 'sdk': ID8_SDK},
+              open(os.path.join(out, 'mgu-app.json'), 'w', encoding='utf-8', newline='\n'), indent=2)
+    # what would leave the app without its SDK on the car, caught here
+    boot = open(os.path.join(out, 'src', 'boot.js'), encoding='utf-8').read()
+    names = set(re.findall(r"require\('([^']+)'\)", boot))
+    extra = sorted(n for n in names if n not in ID8_SDK and n not in ('fs', 'path'))
+    if extra or not set(ID8_SDK) <= names:
+        sys.exit('%s: kit/id8/boot.js may require only fs, path and %s by name (it names %s)'
+                 % (app_id, ', '.join(ID8_SDK), ', '.join(extra) or 'too few'))
+    members = []
+    for base, _, found in os.walk(out):
+        for n in found:
+            f = os.path.join(base, n)
+            members.append(os.path.relpath(f, out).replace(os.sep, '/'))
+            if n.endswith('.js') and f != os.path.join(out, 'src', 'boot.js') and SDK_CALL.search(open(f, encoding='utf-8').read()):
+                sys.exit('%s: %s asks for the oap-sdk by a require call - on iDrive 8 the SDK comes through kit/sdk.js'
+                         % (app_id, members[-1]))
+    archive = os.path.join(DIST, 'src', '%s@%s.tgz' % (app_id, ver))
+    mtime = int(os.environ.get('SOURCE_DATE_EPOCH') or 1760745600)
+    with gz_header_free(archive) as gz, tarfile.open(fileobj=gz, mode='w', format=tarfile.USTAR_FORMAT) as tf:
+        for name in sorted(members):
+            info = tarfile.TarInfo(name)
+            data = open(os.path.join(out, name), 'rb').read()
+            info.size, info.mode, info.mtime, info.uid, info.gid, info.uname, info.gname = len(data), 0o644, mtime, 0, 0, '', ''
+            tf.addfile(info, io.BytesIO(data))
+    return archive, len(members)
+
+
 def build(app_id, language='en', hmi='ID7'):
     """hmi 'ID8': the iDrive 8 package of the app, under the id app.json's "id8" names (its own Store entry: iDrive 7
     requirements such as the controller gate are not for iDrive 8). The app's code and the kit are the same; the kit
@@ -690,6 +805,17 @@ def build(app_id, language='en', hmi='ID7'):
 
     # --- archives ---
     os.makedirs(DIST, exist_ok=True)
+    if hmi == 'ID8':
+        # iDrive 8: the source package only. The .mgu / npm packages of this stage would install there and never start:
+        # the MGU Store's deploy tool gives them no oap-sdk on iDrive 8 (source_package_id8). The stage itself
+        # (dist/<id>/) stays for the tools that run the app on a computer.
+        for stale in (f'{app_id}@{ver}.mgu', f'{app_id}@{ver}.tgz'):
+            if os.path.exists(os.path.join(DIST, stale)):
+                os.remove(os.path.join(DIST, stale))
+        archive, n = source_package_id8(spec, stage, pkg)
+        print(f'{app_id} {ver}: {os.path.relpath(archive, ROOT)} ({os.path.getsize(archive) // 1024} KiB, a source package of {n} files, '
+              f'built on the head unit), {len(uidesc["containers"])} screens, states {state_ids}')
+        return
     bundle = os.path.join(DIST, f'{app_id}@{ver}.mgu')
     with gz_header_free(bundle) as gz, tarfile.open(fileobj=gz, mode='w') as tf:
         for n in ('meta.json', 'source', 'rhmiData', 'rhmiDataStartWidget', 'oapgen'):

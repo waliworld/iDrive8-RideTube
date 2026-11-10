@@ -17,8 +17,8 @@
 const fs = require('fs');
 const path = require('path');
 
-// iDrive 8 (app-spec.json "hmi": "ID8"): through the SDK's own typed proxies, as IterioDev's car-tested apps read the
-// car there (watchSdk below) - the native binding and the interface files this module reads are iDrive 7's
+// iDrive 8 (app-spec.json "hmi": "ID8"): through the SDK's own typed proxies (watchSdk below; the SDK linked into
+// the app's entry module, kit/sdk.js) - the native binding and the interface files this module reads are iDrive 7's
 const ID8 = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'app-spec.json'), 'utf8')).hmi === 'ID8'; } catch (e) { return false; } })();
 let someip = null;
 if (!ID8) try { someip = require('someip'); } catch (e) { /* host preview / not installed */ }
@@ -95,7 +95,7 @@ async function watch(iface, instance, handlers, log, opts) {
  */
 function watchSdk(res, iface, instance, handlers, log, opts) {
     let builders = null;
-    try { builders = require('oap-sdk').someipBuilders; } catch (e) { /* no SDK (host preview) */ }
+    try { builders = require('./sdk').someipBuilders; } catch (e) { /* no SDK (host preview) */ }
     if (!builders || typeof builders.buildAndInitTypedProxy !== 'function') { res.error = 'no someipBuilders in this SDK'; return res; }
     const fields = Object.keys(handlers || {});
     const give = (f, v) => { try { handlers[f](v); } catch (e) { if (log) log.warn(iface + '.' + f + ': ' + e); } };

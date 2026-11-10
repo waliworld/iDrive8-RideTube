@@ -1,5 +1,30 @@
 # Changelog
 
+## App 0.4.3: iDrive 8, the tile greys out and nothing opens - the app had no SDK
+
+The cause of the report from the car (0.4.0 to 0.4.2): tapping RideTube's tile greys it out and nothing opens.
+
+- The MGU Store's deploy tool gives an app BMW's oap-sdk in two ways. On iDrive 7 it generates the module
+  `node_modules/oap-sdk` for a package that asks for it, which is how the original RideTube runs there. On iDrive 8
+  it does not: there it only builds source packages (`mgu-app.json`), linking the modules they list against the
+  oap-sdk of an app already on the car. RideTube for iDrive 8 was published as a package of the first kind. It
+  installed, got its tile, and its process ended at the first line that loads the SDK, every time it was started.
+  Reproduced with the deploy tool on its simulated iDrive 8 unit: the package queued for the car has no SDK in it.
+- RideTube for iDrive 8 is now a source package, the kind the Store's own app is. One module is linked on the car,
+  the kit's new entry module (`kit/id8/boot.js`); the kit and the app are plain files of the package and get the SDK
+  from it (`kit/sdk.js`). The catalog lists it with `"build": "unit"`.
+- The entry module does the start, the tile and the shutdown as the Store's app does them (its `store.js`,
+  GPL-3.0-or-later, written again for the kit), and none of it waits for RideTube's own code or fails with it: if
+  that code does not load or start, the page still opens and says what failed.
+- iDrive 8 `permissions.json` names iDrive 8's interfaces (it had iDrive 7's); the app's log id is its own (`RTB8`).
+- The page's first status line is the entry module's: version, start reason, tile, page, the app's code.
+- Tests: `kit/tools/test_mgu8.js` builds the source package with the Store's own linker (the file its deploy tool
+  runs on the car) and starts the result through its `main`, with no module named `oap-sdk` to be found;
+  `kit/tools/test_node8.js` parses every file that ships as Node 8 does.
+- 0.4.1's and 0.4.2's changes to how the screen follows the page stay, but they were not the cause.
+- iDrive 7: as the original (the kit's start there is back to the original, with a listener for the SDK's `error`
+  event).
+
 ## App 0.4.2: iDrive 8, the tile opens nothing / the page stays grey
 
 Still reported from an iDrive 8 car: the tile is tapped, the screen goes grey, RideTube never shows. Not confirmed

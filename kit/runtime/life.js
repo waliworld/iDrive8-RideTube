@@ -15,39 +15,27 @@
  * counts only once the app was on screen (the Store does the same, store.js _sawForeground).
  */
 class Life {
-    /**
-     * opts.once: a status the SDK refuses is not sent again (iDrive 8's SDK may have no app status channel).
-     * opts.activeOnly: ACTIVE and never INACTIVE (iDrive 8: the Store's app and IterioDev's report nothing after the
-     * start there, and the manager may stop an app that says INACTIVE - which a page wrongly taken for hidden did).
-     */
-    constructor(app, log, opts) {
+    constructor(app, log) {
         this.app = app;
         this.log = log;
-        this.once = !!(opts && opts.once);
-        this.activeOnly = !!(opts && opts.activeOnly);
-        this.off = false;
         this.shown = null;      // null: not shown yet
         this.widget = false;
         this.jobs = new Set();
         this.sent = null;       // the status last sent
     }
 
-    want() { return this.activeOnly || this.shown !== false || this.widget || this.jobs.size > 0; }
+    want() { return this.shown !== false || this.widget || this.jobs.size > 0; }
 
     /** Send the status if it changed (force: send it anyway, e.g. once the status channel is up). */
     sync(force) {
-        if (this.off) return Promise.resolve();
         const on = this.want();
         if (!force && on === this.sent) return Promise.resolve();
         this.sent = on;
-        const why = on ? (this.activeOnly ? 'always' : this.shown !== false ? 'on screen' : this.widget ? 'widget' : 'running ' + [...this.jobs].join(', ')) : 'hidden';
+        const why = on ? (this.shown !== false ? 'on screen' : this.widget ? 'widget' : 'running ' + [...this.jobs].join(', ')) : 'hidden';
         return Promise.resolve()
             .then(() => (on ? this.app.registerActive() : this.app.registerInactive()))
             .then(() => this.log.info('registered ' + (on ? 'active' : 'inactive') + ' (' + why + ')'))
-            .catch((e) => {
-                this.sent = null;                                                   // sent again next time
-                if (this.once) { this.off = true; this.log.warn('app status: ' + e + ' - not reported on this head unit'); } else this.log.warn('app status: ' + e);
-            });
+            .catch((e) => { this.sent = null; this.log.warn('app status: ' + e); });   // sent again next time
     }
 
     setShown(on) {

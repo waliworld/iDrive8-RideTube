@@ -1,12 +1,14 @@
 'use strict';
-// A built app (dist/<id>) started as on the head unit, against a fake oap-sdk whose HMI sends the screen events of a
+// An iDrive 8 app as the head unit built it (id8_link.js: the source package linked by the MGU Store's own linker),
+// started as on the car - its package.json's main, the stock entry point, which runs the linked bundle (the kit's entry
+// module kit/id8/boot.js, then the kit and the app) - against a fake oap-sdk whose HMI sends the screen events of a
 // scenario and a fake mgu-render socket (mgu-render/1: X_READY, READY 2880 x 960 with touch, TICK, X_STATE). Prints
 // what the HMI and the renderer saw as one JSON line: { shows: [SHOW values in order], frames, place, opens, status,
-// info: { label: last text }, titles, tile, log: [app log lines] }.
-// Used by test_mgu8.js:  node kit/tools/mgu8_harness.js <dist/id> <scenario> [sdk]
+// info: { label: last text }, titles, tile, asked: [modules asked for by name that the car has not], log: [...] }.
+// Used by test_mgu8.js:  node kit/tools/mgu8_harness.js <built package> <scenario> [sdk]
 //   scenario: the HMI's events once the page was opened (SCENARIOS below)
-//   sdk: how the fake oap-sdk starts and answers (SDKS below; default 'plain'), after what the Store's app and
-//        IterioDev's host handle on iDrive 8's SDK
+//   sdk: how the fake oap-sdk starts and answers (the list above class OnlineApp; default 'plain'), after what the
+//        MGU Store's app handles on iDrive 8's SDK
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
@@ -14,15 +16,20 @@ const path = require('path');
 const Module = require('module');
 const EventEmitter = require('events');
 
-const [stageIn, scenario, sdk = 'plain'] = process.argv.slice(2);
+const [builtIn, scenario, sdk = 'plain'] = process.argv.slice(2);
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mgu8-'));
-const stage = path.join(tmp, path.basename(stageIn));
-fs.cpSync(stageIn, stage, { recursive: true });
-fs.mkdirSync(path.join(stage, 'data'));
+// an installed app's home: source/ (the package), data/, rhmiData/ (the installed description)
+const home = path.join(tmp, 'oap_13001');
+const source = path.join(home, 'source');
+fs.cpSync(builtIn, source, { recursive: true });
+fs.mkdirSync(path.join(home, 'data'));
+const pkg = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));
+// (the app's own code broken on purpose: the tile and the page must work without it)
+if (sdk === 'kit-broken') fs.writeFileSync(path.join(source, 'app', 'main.js'), "'use strict';\nthrow new Error('broken on purpose');\n");
 
 // ---- the fake renderer
 const seen = {
-    shows: [], frames: 0, place: null, hello: null, titles: [], info: {}, opens: 0, openTries: 0, initialized: 0,
+    shows: [], frames: 0, place: null, hello: null, titles: [], info: {}, opens: 0, openTries: 0, initialized: 0, asked: [],
     status: { active: 0, inactive: 0, hmiVisible: 0, hmiInvisible: 0 }, tile: { init: 0, enabled: 0, text: 0, icon: 0, mapped: 0 },
     exit: null, proxies: [],
 };
@@ -72,7 +79,7 @@ class Comp extends EventEmitter {
     getId() { return this.id; }
     setValue(row, cell, value) { if (/_TITLE$/.test(this.n)) seen.titles.push(value); else seen.info[this.n] = value; return Promise.resolve(); }
 }
-const ui = JSON.parse(fs.readFileSync(path.join(stage, 'source', 'rhmiData', 'uiDescriptions', 'ID8', 'uiDescription.json'), 'utf8'));
+const ui = JSON.parse(fs.readFileSync(path.join(source, 'rhmiData', 'uiDescriptions', 'ID8', 'uiDescription.json'), 'utf8'));
 const comps = {};
 Object.keys(ui.containers).forEach((cid) => {
     const c = ui.containers[cid];
@@ -97,12 +104,11 @@ Object.assign(rhmi, {
     closeState: () => Promise.resolve(),
     getResourceBundle: () => ({ createResourceHandles: () => Promise.resolve(), getResourceHandle: () => 1, destroyResourceHandles: () => Promise.resolve() }),
 });
-const appDesc = JSON.parse(fs.readFileSync(path.join(stage, 'source', 'rhmiData', 'application.json'), 'utf8'));
+const appDesc = JSON.parse(fs.readFileSync(path.join(source, 'rhmiData', 'application.json'), 'utf8'));
 const desc = appDesc.application.entryPoints[0];
-// the installed rhmiData (where the app reads its entry points) is left out for 'no-installed-json': the SDK's copy then
-fs.mkdirSync(path.join(stage, 'rhmiData', 'resources'), { recursive: true });
-if (sdk === 'no-installed-json') fs.rmSync(path.join(stage, 'rhmiData', 'application.json'), { force: true });
-else fs.writeFileSync(path.join(stage, 'rhmiData', 'application.json'), JSON.stringify(appDesc));
+// the installed rhmiData is left out for 'no-installed-json': the SDK's copy of the description, or the package's, then
+fs.mkdirSync(path.join(home, 'rhmiData', 'resources'), { recursive: true });
+if (sdk !== 'no-installed-json') fs.writeFileSync(path.join(home, 'rhmiData', 'application.json'), JSON.stringify(appDesc));
 /*
  * How the SDK starts and answers:
  *   plain            start() resolves with the screens there, startReason set (a 24.x-like SDK)
@@ -110,17 +116,25 @@ else fs.writeFileSync(path.join(stage, 'rhmiData', 'application.json'), JSON.str
  *                    event on the way (the SDK reporting a failure of its own); iDrive 8's names (isInitialized)
  *   hang             the 'initialized' event comes, start()'s promise never resolves
  *   late-rhmi        start() resolves first, the screens and the event 1 s later
+ *   member           the SDK's modules export { OnlineApp }, { logging }, { someipBuilders } (id8_link.js)
+ *   background       started with the platform (autostart, as the Store's deploy tool lists an iDrive 8 app): no entry
+ *                    point named; the tile is tapped 1.5 s later ('entryPointExecute')
+ *   no-rhmi          a start for no screen: no RHMI application
  *   no-last          started for the tile, but getLastExecutedEntryPointUuid() names none and no execute event comes
  *   refuse-open      the HMI refuses to open the page twice (not an INVALID_ error), then opens it
  *   init-fails       the entry point's init() is refused
  *   map-refused      mapEntryState is refused every time
- *   no-installed-json  no rhmiData/application.json beside the app's source
+ *   no-installed-json  no rhmiData/application.json beside the app's source, no description in the SDK
  *   status-throws    the app status calls throw (no status channel on this SDK)
+ *   no-logging       the SDK's logging module has no getSDKLogger
+ *   kit-broken       the app's own code throws when loaded
  */
+const EVENT = ['event', 'hang', 'late-rhmi'].indexOf(sdk) >= 0;
+let theApp = null;
 class OnlineApp extends EventEmitter {
-    constructor() { super(); this.appDescription = appDesc; }
+    constructor() { super(); theApp = this; if (sdk !== 'no-installed-json') this.appDescription = appDesc; }
     start() {
-        const up = () => { this.rhmiApplication = rhmi; };
+        const up = () => { if (sdk !== 'no-rhmi') this.rhmiApplication = rhmi; };
         if (sdk === 'event' || sdk === 'hang') {
             return new Promise((resolve) => setTimeout(() => {
                 up();
@@ -132,16 +146,17 @@ class OnlineApp extends EventEmitter {
         }
         if (sdk === 'late-rhmi') { setTimeout(() => { up(); this.emit('initialized'); }, 1000); return Promise.resolve(); }
         up();
-        this.startReason = 'ENTRY_POINT';
+        this.startReason = sdk === 'background' ? 'AUTOSTART' : sdk === 'no-rhmi' ? 'CONFIG_STATE' : 'ENTRY_POINT';
+        if (sdk === 'background') setTimeout(() => this.emit('entryPointExecute', desc.uuid, 'USER', 'tile'), 1500);
         return Promise.resolve();
     }
-    getVisibilityData() { return sdk === 'event' || sdk === 'hang' || sdk === 'late-rhmi' ? { reason: 'ENTRY_POINT' } : undefined; }
+    getVisibilityData() { return EVENT ? { reason: 'ENTRY_POINT' } : undefined; }
     initialized() { seen.initialized++; return Promise.resolve(); }
     registerActive() { seen.status.active++; if (sdk === 'status-throws') throw new Error('no app status service'); return Promise.resolve(); }
     registerInactive() { seen.status.inactive++; return Promise.resolve(); }
     registerHmiVisible() { seen.status.hmiVisible++; return Promise.resolve(); }
     unregisterHmiVisible() { seen.status.hmiInvisible++; return Promise.resolve(); }
-    getLastExecutedEntryPointUuid() { return sdk === 'no-last' ? undefined : desc.uuid; }
+    getLastExecutedEntryPointUuid() { return sdk === 'no-last' || sdk === 'background' ? undefined : desc.uuid; }
     getEntryPoints() {
         return [{
             getDescription: () => desc,
@@ -177,7 +192,7 @@ const SCENARIOS = {
     // an uncaught error in the app's process: it runs on, the page says what it was
     'uncaught': [['visible', { visible: 1 }], ['throw']],
 };
-let played = false, theApp = null;
+let played = false;
 function play() {
     if (played) return;
     played = true;
@@ -197,29 +212,37 @@ function play() {
 }
 const typed = (iface) => ({ statusCarSpeed2: { getValue: () => Promise.resolve({ speedVehicleCentreOfGravity: 0 }), subscribe: () => Promise.resolve() },
     statusBattery2: { getValue: () => Promise.resolve({ conditionBatteryChargingCondition: 80 }), subscribe: () => Promise.resolve() }, iface });
+// the SDK the linked bundle's modules hand out (id8_link.js), and nothing else by that name: on the car a package
+// that asks for a module "oap-sdk" (or the raw SOME/IP binding) finds none
+global.__mguFakeSdk = {
+    shape: sdk === 'member' ? 'member' : 'direct',
+    OnlineApp,
+    logging: sdk === 'no-logging' ? {} : { getSDKLogger: () => logger },
+    someipBuilders: { buildAndInitTypedProxy: (iface, inst, t) => { seen.proxies.push([iface, inst, typeof t]); return Promise.resolve(typed(iface)); } },
+};
 const real = Module._load;
 Module._load = function (req) {
-    if (req === 'oap-sdk') {
-        const api = {
-            OnlineApp: class extends OnlineApp { constructor() { super(); theApp = this; } },
-            someipBuilders: { buildAndInitTypedProxy: (iface, inst, t) => { seen.proxies.push([iface, inst, typeof t]); return Promise.resolve(typed(iface)); } },
-        };
-        if (sdk !== 'no-logging') api.logging = { getSDKLogger: () => logger };
-        return api;
+    if (req === 'oap-sdk' || req === 'someip') {
+        seen.asked.push(req);
+        const e = new Error("Cannot find module '" + req + "'");
+        e.code = 'MODULE_NOT_FOUND';
+        throw e;
     }
-    if (req === 'someip') { seen.rawSomeip = true; throw new Error('no someip here'); }
     return real.apply(this, arguments);
 };
 process.on('exit', (code) => { if (seen.exit === null && code) process.stdout.write(JSON.stringify({ exit: code, log: logs.slice(-8) }) + '\n'); });
-require(path.join(stage, 'source', 'javascript', 'app.js'));
+// as the app manager starts it: the package's main, in the app's data folder
+process.chdir(path.join(home, 'data'));
+require(path.join(source, pkg.main));
 const long = ['left-home', 'hidden-event', 'manager-hides', 'stack-other-keys', 'stack-map', 'stack-only-left', 'stack-only'].indexOf(scenario) >= 0;
 setTimeout(() => {
     let file = '';
-    try { file = fs.readFileSync(path.join(stage, 'data', path.basename(stageIn) + '.log'), 'utf8'); } catch (e) { /* none */ }
+    try { file = fs.readFileSync(path.join(home, 'data', pkg.name + '.log'), 'utf8'); } catch (e) { /* none */ }
     seen.exit = 0;
     console.log(JSON.stringify(Object.assign(seen, {
-        log: logs.filter((l) => /display|visible|hidden|front|renderd|stack|entry|SDK started|initialized|OnlineApp|signals/i.test(l)).slice(-16),
+        log: file.split('\n').filter((l) => /boot:|display|visible|hidden|front|renderd|stack|entry|initialized|OnlineApp|signals|FATAL|ERROR/i.test(l)).slice(-24),
         fatal: file.split('\n').filter((l) => / FATAL /.test(l)),
     })));
     process.exit(0);
-}, (scenario === 'stack-only-left' ? 9500 : long ? 6000 : scenario === 'no-renderer' || scenario === 'not-in-front' ? 10000 : 3500) + (sdk === 'late-rhmi' || sdk === 'no-last' || sdk === 'refuse-open' ? 2500 : 0));
+}, (scenario === 'stack-only-left' ? 9500 : long ? 6000 : scenario === 'no-renderer' || scenario === 'not-in-front' ? 10000 : 3500) +
+    (['late-rhmi', 'no-last', 'refuse-open', 'background'].indexOf(sdk) >= 0 ? 2500 : sdk === 'no-rhmi' ? 3500 : 0));

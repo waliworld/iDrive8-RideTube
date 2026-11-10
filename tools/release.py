@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Lays out the MGU Store catalog of this repository in dist/release/: catalog.json, the app's OAP package
-(without node_modules/oap-sdk: the head unit makes it from an app already on the car), the service's tool kit
-and the app icon. jap-node22 (required by jap-ridetube-d) comes from the JustAnotherPU/mgu-apps source. Upload every file of dist/release/ as an asset of a GitHub release tagged `catalog`.
+"""Lays out the MGU Store catalog of this repository in dist/release/: catalog.json, the app's package, the service's
+tool kit and the app icon. Upload every file of dist/release/ as an asset of a GitHub release tagged `catalog`.
+
+The app's package differs by head unit, because the Store's deploy tool gives an app BMW's oap-sdk differently:
+  iDrive 7: the OAP package without node_modules/oap-sdk (the head unit generates that module from an app on the car);
+  iDrive 8: the app's source package (mgu-app.json; catalog "build": "unit"), which the head unit builds, linking the
+            app's entry module against the oap-sdk of an app on the car. The deploy tool generates no oap-sdk module on
+            iDrive 8: an OAP package there installs, shows its tile and never starts (RideTube 0.4.0 to 0.4.2).
 
 Build first:  python3 kit/tools/build.py jap_ridetube                      (dist/jap_ridetube@<v>.tgz, iDrive 7)
-              python3 kit/tools/build.py --hmi ID8 jap_ridetube            (dist/jap_ridetube8@<v>.tgz, iDrive 8)
+              python3 kit/tools/build.py --hmi ID8 jap_ridetube            (dist/src/jap_ridetube8@<v>.tgz, iDrive 8)
               (cd native/ytdec && make target)
               (cd native/jap-ridetube-d && MGU_STORE=... ./build.sh)      (its dist/)
 Then:         python3 tools/release.py [--base URL] [--repo owner/name] [--hmi ID7|ID8|both] [--tool <kit.tgz> ...]
@@ -82,9 +87,25 @@ def main():
     tools = {t: json.load(open(os.path.join(ROOT, 'native', t, 'component.json'))) for t in TOOLS}
     pkgs = {}
     for aid, hmi, _ in apps:
-        pkg = os.path.join(ROOT, 'dist', '%s@%s.tgz' % (aid, app['version']))
+        name = '%s@%s.tgz' % (aid, app['version'])
+        if hmi == ['ID8']:
+            # the source package, as build.py packed it; what it must be is checked here once more, since a package of
+            # the other kind installs on iDrive 8 and never starts
+            pkg = os.path.join(ROOT, 'dist', 'src', name)
+            if not os.path.isfile(pkg):
+                sys.exit('release.py: %s missing (python3 kit/tools/build.py --hmi ID8 %s)' % (pkg, APP))
+            with tarfile.open(pkg, 'r:gz') as t:
+                names = t.getnames()
+                m = json.load(t.extractfile('mgu-app.json')) if 'mgu-app.json' in names else {}
+            if (m.get('id'), m.get('version')) != (aid, app['version']) or not all(f in names for f in m.get('modules', [None])) \
+                    or '%s/package.json' % m.get('tree') not in names or any('node_modules' in n or n.endswith('javascript/app.js') for n in names):
+                sys.exit('release.py: %s is not the source package of %s %s' % (pkg, aid, app['version']))
+            shutil.copy(pkg, os.path.join(out, name))
+            pkgs[aid] = name
+            continue
+        pkg = os.path.join(ROOT, 'dist', name)
         if not os.path.isfile(pkg):
-            sys.exit('release.py: %s missing (python3 kit/tools/build.py%s %s)' % (pkg, ' --hmi ID8' if hmi == ['ID8'] else '', APP))
+            sys.exit('release.py: %s missing (python3 kit/tools/build.py %s)' % (pkg, APP))
         strip_sdk(pkg, os.path.join(out, os.path.basename(pkg)), mtime)
         pkgs[aid] = os.path.basename(pkg)
         # the local build's packages hold BMW's oap-sdk: only dist/release/ is ever uploaded, so they go
@@ -107,6 +128,9 @@ def main():
         'requires': req(tools['jap-ridetube-d']['version']),
         'uninstallable': True, 'mguHmi': hmi, 'icon': icon, 'iconSha256': sha256(os.path.join(out, icon)),
     } for aid, hmi, req in apps]
+    for c in comps:
+        if c['mguHmi'] == ['ID8']:
+            c['build'] = 'unit'             # (the Store: the artifact is a source package, built on the head unit)
     # the tools: listed for this release's head units only (each kit itself may say more)
     for kit in a.tool:
         with tarfile.open(kit, 'r:gz') as t:

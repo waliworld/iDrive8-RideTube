@@ -184,9 +184,10 @@ class Display {
         return null;
     }
     /**
-     * iDrive 8, once a second: the HMI's own page under the surface says how things stand - four status lines in
-     * its list (what the app, the page, the renderer and the app's service say; build.py's INFO labels), read when
-     * the drawn screen does not come, and the reason in the page's title once the screen has stayed empty for 4 s.
+     * iDrive 8, once a second: the HMI's own page under the surface says how things stand - status lines in its
+     * list (build.py's INFO labels: the screen and the page, the renderer, the app's service; the first line is the
+     * entry module's), read when the drawn screen does not come, and the reason in the page's title once the screen
+     * has stayed empty for 4 s.
      */
     _id8Status() {
         if (!this.screen) return;
@@ -194,10 +195,9 @@ class Display {
         const why = this._id8Why(), now = Date.now();
         const vis = !!(ui.isVisible && ui.isVisible(n));
         const b = (v) => (v === null || v === undefined ? '?' : v ? 'yes' : 'no');
+        // (the first line is the entry module's: the version, the start, the tile, the page, the app's code)
         if (ui.info) {
-            const fatal = ui.lastFatal ? ui.lastFatal() : null, a = g && g.info && g.info.appArea;
-            ui.info(n + '_INFO1', this.spec.title + ' ' + this.spec.version + ' for iDrive 8: running | start: ' + (h.start || '?') +
-                ' | tile: ' + (h.entry || '?') + ' | page: ' + (h.open || '?') + (fatal ? ' | error: ' + fatal : ''));
+            const a = g && g.info && g.info.appArea;
             ui.info(n + '_INFO2', 'Screen: ' + (why || 'drawn by the GPU renderer (if you can read this, its picture is not reaching the display)') +
                 ' | page: visible ' + b(h.visible) + ', focus ' + b(h.focus) + ', stack ' + (h.stack || '-') + (h.fallback ? ' (no visible events)' : '') + ', shown ' + b(vis));
             ui.info(n + '_INFO3', 'Renderer: ' + (!g ? 'no socket - is the GPU renderer (mgu-render) installed and running?'

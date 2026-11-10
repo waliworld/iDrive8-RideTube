@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds this repository's MGU Store release in dist/release/ (catalog.json and its assets), for the GitHub release
 # tagged "catalog" of waliworld/iDrive8-RideTube:
-#   jap_ridetube8    RideTube for iDrive 8 (built here, kit/tools/build.py --hmi ID8)
+#   jap_ridetube8    RideTube for iDrive 8, as a source package the head unit builds (kit/tools/build.py --hmi ID8)
 #   jap-ridetube-d   its service (packed here; ytdec and ytdlp.pyz as in JustAnotherPU's release 0.3.9, checked below)
 #   jap-node22       Node.js 22 for the service (packed here from tools/jap-node22; the binary as in JustAnotherPU/mgu-apps)
 # Usage: MGU_STORE=<a clone of github.com/robertnisipeanu/mgu-store> tools/release_id8.sh
@@ -39,22 +39,25 @@ take "$dl/jap-node22@22.23.4.tgz" files/bin/node 8aacb15e7d149fdbfa73f6ec91641dc
 take "$dl/jap-node22@22.23.4.tgz" files/LICENSE c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4 "$n/build/LICENSE"
 chmod 755 "$n/build/node"
 
-# the app. The package goes out without node_modules/oap-sdk (the head unit links BMW's own from an app on it), so a
-# placeholder stands in for the build when there is no oap-sdk folder (kit/tools/build.py copies two files of it).
+# the app: its iDrive 8 source package (dist/src/). BMW's oap-sdk is in no file of it: the head unit links the app's
+# entry module against the SDK of an app on the car. (kit/tools/build.py copies two files of an oap-sdk folder into the
+# stage the tests run on a computer; a placeholder stands in when there is none.)
 if [ ! -f "$root/oap-sdk/index.js" ]; then
     mkdir -p "$root/oap-sdk"
-    echo "module.exports = {}; // placeholder: release.py takes node_modules/oap-sdk out of the package" > "$root/oap-sdk/index.js"
+    echo "module.exports = {}; // placeholder: no package of this repository's release holds an oap-sdk" > "$root/oap-sdk/index.js"
     echo '{"name":"oap-sdk","version":"0.0.0-placeholder"}' > "$root/oap-sdk/package.json"
 fi
 cd "$root"
-python3 kit/tools/build.py --hmi ID8 jap_ridetube
-node kit/tools/test_runtime.js >/dev/null && node kit/tools/test_keyboard.js >/dev/null
-node kit/tools/test_ridetube8.js >/dev/null
-node kit/tools/test_mgu8.js >/dev/null
-(cd "$d" && node test/test_ytd.js >/dev/null && node test/test_thumb.js >/dev/null)
-
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct 2>/dev/null || echo 0)}
 export SOURCE_DATE_EPOCH
+python3 kit/tools/build.py --hmi ID8 jap_ridetube
+node kit/tools/test_node8.js >/dev/null
+node kit/tools/test_runtime.js >/dev/null && node kit/tools/test_keyboard.js >/dev/null
+node kit/tools/test_ridetube8.js >/dev/null
+# the source package built with the Store's own linker, as on the head unit, and started against a fake iDrive 8
+MGU_STORE="$MGU_STORE" node kit/tools/test_mgu8.js | tail -1 | grep -q '^mgu8: all ok$' || { echo "release_id8.sh: kit/tools/test_mgu8.js did not pass (or was skipped)" >&2; exit 1; }
+(cd "$d" && node test/test_ytd.js >/dev/null && node test/test_thumb.js >/dev/null)
+
 node "$MGU_STORE/deploy/hu" artifact "$d" --out "$d/dist"
 node "$MGU_STORE/deploy/hu" artifact "$n" --out "$root/dist"
 python3 tools/release.py --hmi ID8 --tool "$root/dist/jap-node22@22.23.4.tgz"

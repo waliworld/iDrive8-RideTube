@@ -4,11 +4,11 @@ RideTube, the unofficial YouTube client for BMW head units, **ported to iDrive 8
 [JustAnotherPU/ridetube](https://github.com/JustAnotherPU/ridetube) (iDrive 7), GPL-3.0-or-later; the port adds an
 iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.0) and Node.js 22 marked for iDrive 8.
 
-> **Beta: not yet working on an iDrive 8 car.** It is built and tested on a computer against iDrive 8's 2880 x 960
-> screen and a simulated iDrive 8 HMI, and its packages install on the MGU Store's simulated iDrive 8 head unit. The
-> first report from a car (0.4.0): the tile opened a grey page and RideTube never showed. 0.4.2 changes the start to
-> match the apps known to run on iDrive 8 and makes the page say what is wrong; it is not confirmed on a car yet.
-> **If the screen stays grey, photograph it**: the lines on the page say why. Reports welcome in the issues.
+> **Beta: not yet confirmed on an iDrive 8 car.** 0.4.0 to 0.4.2 did not start there: the tile greyed out when
+> tapped. The cause was the kind of package (below, "iDrive 8": on iDrive 8 the Store gives BMW's app SDK only to
+> source packages), fixed in 0.4.3 and checked with the Store's own linker and its simulated iDrive 8 head unit, not
+> yet on a car. The app's own screen code has never run on a car either. **If the page opens but stays grey,
+> photograph it**: the lines on it say why. Reports welcome in the issues.
 
 ## Install on an iDrive 8 car
 
@@ -104,8 +104,15 @@ next head-unit restart.
 Experimental: built and tested on a computer against iDrive 8's screen (2880 x 960) and the packages of IterioDev's
 car-tested iDrive 8 apps, **not yet run on an iDrive 8 car**. Reports welcome in the issues.
 
-- Its own app, `jap_ridetube8`, from the same code: the HMI has an empty page of the app's and the GPU renderer draws
-  the whole screen over the app area (under the HMI's status strip, over the climate bar). Five tiles a row.
+- Its own app, `jap_ridetube8`, from the same code: the HMI has a page of the app's (status lines only) and the GPU
+  renderer draws the whole screen over the app area (under the HMI's status strip, over the climate bar). Five tiles
+  a row.
+- **A source package.** On iDrive 8 the MGU Store's deploy tool gives BMW's oap-sdk only to source packages
+  (`mgu-app.json`): it links the modules they list against the SDK of an app already on the car, as it builds the
+  Store's own app. (On iDrive 7 it also generates `node_modules/oap-sdk` for an ordinary package; on iDrive 8 such a
+  package installs, shows its tile and never starts.) `build.py --hmi ID8` writes `dist/src/jap_ridetube8@<v>.tgz`:
+  `mgu-app.json`, one linked module (`kit/id8/boot.js`: the start, the tile, the shutdown) and the package tree with
+  the kit and the app as plain files (`app/`).
 - Touch only (no controller gate on iDrive 8). The header's back arrow closes RideTube (a sheet over the page first).
 - Search opens RideTube's own keyboard, with your recent searches as buttons. Typing works only while parked; the
   recent searches work while driving.
@@ -122,13 +129,17 @@ What may need a fix on the car, and how to tell (`journalctl -u jap-ridetube-d`,
   `/var/opt/jap-ridetube-d/state/audio.json` (`native/jap-ridetube-d/README.md`) and restart the service.
 - **The picture.** ytdec decodes on the Intel GPU with the head unit's Media SDK (`libmfxhw64`). The service logs at
   start whether the head unit has it. Without it the sound plays and the picture shows "video failed, audio only".
-- **The tile.** The app makes its tile usable as the MGU Store's app does on iDrive 8 (the name and icon stay the
-  manager's). If the tile does nothing, the app's log says why (`entry point ...`, `open entry state ...`).
+- **The tile.** The entry module makes the tile usable as the MGU Store's app does on iDrive 8 (the name and icon
+  stay the manager's). If the tile greys out or does nothing, the app's log has its lines (`boot: ...`): whether the
+  SDK started, the start reason, the tile's steps, the page. No `boot:` line at all means the app's process did not
+  get as far as its first line. If the install itself is refused, the Store says why (the head unit could not build
+  the package).
 - **A grey page.** The HMI's own page under RideTube's screen has four status lines and says the reason in its
-  title: the version and how the app was started (`start: ...`, `tile: ...`), the page (`visible`, `focus`,
-  `stack`), the renderer (`connected`, `in front`, `on screen`, `frames`) and the service. RideTube's screen covers
-  them while it draws, so a page you can read them on is one the picture did not reach: a photo of it is the report.
-  A page with only `Starting...` means the app's code did not run. The app's log has the first events the HMI sent
+  title: the version, how the app was started, the tile, the page and whether the app's code loaded
+  (`start: ... | tile: ... | page: ... | app: ...`), the screen (`visible`, `focus`, `stack`), the renderer
+  (`connected`, `in front`, `on screen`, `frames`) and the service. RideTube's screen covers them while it draws, so
+  a page you can read them on is one the picture did not reach: a photo of it is the report. A page with only
+  `Starting...` means the app's process did not run. The app's log has the first events the HMI sent
   (`hmi: visible ...`, `hmi: focus ...`, `hmi: stack ...`).
 
 ## Settings
@@ -199,7 +210,8 @@ A release needs an `oap-sdk` folder extracted from a BMW app you own (`node kit/
 ```sh
 python3 kit/tools/build.py jap_ridetube && node kit/tools/test_ridetube.js
 python3 kit/tools/build.py --hmi ID8 jap_ridetube && node kit/tools/test_ridetube8.js   # SHOTS=<dir>: PNGs of each screen
-node kit/tools/test_mgu8.js       # the built iDrive 8 app against a fake HMI and a fake mgu-render
+MGU_STORE=<a clone of github.com/robertnisipeanu/mgu-store> node kit/tools/test_mgu8.js   # iDrive 8: built by the Store's linker, started
+node kit/tools/test_node8.js                                                             # every shipped file parses as Node 8 does
 export MGU_STORE=<a clone of the MGU Store>
 (cd native/jap-ridetube-d && ./build.sh)      # jap-node22 is built in github.com/JustAnotherPU/mgu-apps
 python3 tools/release.py      # dist/release/: upload every file to a GitHub release tagged "catalog"
