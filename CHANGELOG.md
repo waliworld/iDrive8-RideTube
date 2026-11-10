@@ -1,5 +1,17 @@
 # Changelog
 
+## App 0.4.0, service 0.4.0: iDrive 8
+
+- iDrive 8 (experimental, not yet run on a car): a second app, `jap_ridetube8` (`build.py --hmi ID8`), from the same
+  code. The kit draws the whole screen on the app area of the 2880 x 960 display, with its own back button, an
+  on-screen keyboard for Search (typing only while parked, recent searches as buttons), and the rail's Settings
+  (account and settings). Touch only.
+- Service: finds BMW's interface descriptions on iDrive 8 (`oap-mainapp21`), logs the audio manager's sources and
+  sinks, takes another audio route from `state/audio.json`, says whether the head unit has the GPU decoder's Media
+  SDK; `mguHmi` iDrive 7 and 8.
+- The catalog has an entry per head unit; iDrive 8's does not require the controller gate (iDrive 7 only).
+- iDrive 7: unchanged (the same package but the version).
+
 ## Service 0.3.9
 
 - Videos play again: each video's folder was 0700, so BMW's media engine (its own uid) could not open the audio

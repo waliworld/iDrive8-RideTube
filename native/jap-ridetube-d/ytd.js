@@ -16,7 +16,11 @@ const cp = require('child_process');
 const readline = require('readline');
 
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
-const SOURCE_ID = 1046, SINK_ID = 1024;
+// the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
+const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
+// where MainApp keeps the SOME/IP interface descriptions: iDrive 7 (oap-mainapp), iDrive 8 (oap-mainapp21)
+const SRC_GENS = ['/usr/lib/oap-mainapp/src-gen', '/usr/lib/oap-mainapp/src-gen/someip',
+    '/usr/lib/oap-mainapp21/src-gen/someip', '/usr/lib/oap-mainapp21/src-gen'];
 const MEDIA_FILES = ['audio.m4a', 'index.bin', 'video.h264'];
 // a video's folder: BMW's media engine (its own uid, no capabilities) opens audio.m4a in it, so it must be able to
 // pass through; no read bit, so nobody lists it (and the cache above is 0711: the video ids aren't listed either)
@@ -29,7 +33,9 @@ function defaults() {
     const here = __dirname;
     return {
         someip: env.MGU_YT_SOMEIP || '/usr/lib/someip.node',
-        srcGen: env.MGU_YT_SRCGEN || '/usr/lib/oap-mainapp/src-gen',
+        srcGen: env.MGU_YT_SRCGEN || null,     // one folder (tests); null: the first of srcGens that has the file
+        srcGens: SRC_GENS,
+        audioConf: env.MGU_YT_AUDIO || '/var/opt/jap-ridetube-d/state/audio.json',
         ytdec: env.MGU_YT_YTDEC || path.join(here, 'ytdec'),
         cacheDir: env.MGU_YT_CACHE || '/var/opt/jap-ridetube-d/cache',
         logDir: env.MGU_YT_LOGDIR || '/var/opt/jap-ridetube-d/log',
@@ -654,15 +660,48 @@ function Audio(opts, handlers) {
     this.cc = null;
     this.mp = null;
     this.connId = null;
+    this.src = SOURCE_ID;
+    this.sink = SINK_ID;
 }
+// An interface description: the first folder (srcGen, else srcGens in order) that has the file. iDrive 7 keeps them in
+// oap-mainapp/src-gen, iDrive 8 in oap-mainapp21/src-gen/someip.
+Audio.prototype.iface = function (file) {
+    const dirs = this.opts.srcGen ? [this.opts.srcGen] : this.opts.srcGens || SRC_GENS;
+    for (const d of dirs) {
+        const p = path.join(d, file);
+        let cfg = null;
+        try { cfg = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { continue; }
+        if (!this.ifaceLogged) this.opts.log('interfaces from ' + d);
+        this.ifaceLogged = true;
+        return cfg;
+    }
+    throw new Error('no ' + file + ' in ' + dirs.join(', '));
+};
+// state/audio.json (optional, written by hand): {"sourceID": n, "sinkID": n, "instance": "..."} for a head unit whose
+// audio route differs from iDrive 7's. Read at each init (a fix needs only a restart of the service).
+Audio.prototype.conf = function () {
+    let c = {};
+    try { c = JSON.parse(fs.readFileSync(this.opts.audioConf, 'utf8')) || {}; } catch (e) { /* none: the defaults */ }
+    const id = (v, d) => (Number.isInteger(v) && v > 0 && v < 65536 ? v : d);
+    return { src: id(c.sourceID, SOURCE_ID), sink: id(c.sinkID, SINK_ID), inst: typeof c.instance === 'string' && c.instance ? c.instance : MEDIA_INSTANCE, set: c };
+};
 Audio.prototype.init = async function () {
     if (this.cc && this.mp) return;
     const someip = typeof this.opts.someip === 'string' ? require(this.opts.someip) : this.opts.someip;
-    const cfg = (f) => JSON.parse(fs.readFileSync(path.join(this.opts.srcGen, f), 'utf8'));
-    const cc = await someip.buildProxy(cfg('org_genivi_am_commandinterface_CommandControl.json'), '1');
+    const conf = this.conf();
+    this.src = conf.src;
+    this.sink = conf.sink;
+    const cc = await someip.buildProxy(this.iface('org_genivi_am_commandinterface_CommandControl.json'), '1');
     await cc.init();
-    const mp = await someip.buildProxy(cfg('de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json'), 'OapGenericMedia');
+    const mpCfg = this.iface('de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json');
+    // a head unit whose MediaPlayer has no such instance (another firmware): say which it has instead of hanging
+    const insts = mpCfg && mpCfg.instances && typeof mpCfg.instances === 'object' ? Object.keys(mpCfg.instances) : null;
+    if (insts && insts.length && insts.indexOf(conf.inst) < 0) {
+        throw new Error('MediaPlayer has no instance ' + conf.inst + ' (it has ' + insts.join(', ') + '; set "instance" in ' + this.opts.audioConf + ')');
+    }
+    const mp = await someip.buildProxy(mpCfg, conf.inst);
     await mp.init();
+    await this.route(cc, conf);
     const h = this.h;
     const safe = (fn) => (v) => { try { fn(v); } catch (e) { this.opts.log('someip handler: ' + (e && e.stack || e)); } };
     mp.subscribe({ name: 'playerState', onReceive: safe(h.state) });
@@ -670,6 +709,30 @@ Audio.prototype.init = async function () {
     mp.subscribe({ name: 'playbackErrorEvent', onReceive: safe(h.error) });
     this.cc = cc;
     this.mp = mp;
+};
+// The audio manager's sources and sinks, logged once (what a head unit other than the measured iDrive 7 has), and the
+// source checked: when the one configured is not listed but exactly one source named like the media player's
+// generic OAP source is, that one is used. Nothing is picked for the sink (the wrong one would play in the wrong
+// place): state/audio.json sets it. Lists the head unit cannot give change nothing.
+Audio.prototype.route = async function (cc, conf) {
+    const list = async (attr) => {
+        try { const v = await cc.getValue(attr); return Array.isArray(v) ? v : null; } catch (e) { return null; }
+    };
+    const name = (x) => String(x && (x.name || x.sourceName || x.sinkName) || '');
+    const idOf = (x, k) => (x && typeof x[k] === 'number' ? x[k] : null);
+    const sources = await list('listOfMainSources'), sinks = await list('listOfMainSinks');
+    if (!this.routeLogged) {
+        this.routeLogged = true;
+        const fmt = (l, k) => (l ? l.map((x) => idOf(x, k) + (name(x) ? ':' + name(x) : '')).join(' ') : 'not readable');
+        this.opts.log('audio sources ' + fmt(sources, 'sourceID') + '; sinks ' + fmt(sinks, 'sinkID') +
+            '; using source ' + this.src + ', sink ' + this.sink + (Object.keys(conf.set).length ? ' (audio.json)' : ''));
+    }
+    if (conf.set.sourceID || !sources || !sources.length || sources.some((x) => idOf(x, 'sourceID') === this.src)) return;
+    const named = sources.filter((x) => /oap.?generic.?media/i.test(name(x)) && idOf(x, 'sourceID') !== null);
+    if (named.length === 1) {
+        this.src = idOf(named[0], 'sourceID');
+        this.opts.log('source ' + SOURCE_ID + ' is not on this head unit: using ' + this.src + ' (' + name(named[0]) + ')');
+    } else this.opts.log('source ' + this.src + ' is not listed on this head unit; set "sourceID" in ' + this.opts.audioConf);
 };
 Audio.prototype.waitAvailable = async function () {
     const end = Date.now() + this.opts.availWaitMs;
@@ -682,7 +745,7 @@ Audio.prototype.waitAvailable = async function () {
 Audio.prototype.dropLeftovers = async function () {
     await this.waitAvailable();
     const list = await this.cc.getValue('listOfMainConnections');
-    const ours = (Array.isArray(list) ? list : []).filter((c) => c && c.sourceID === SOURCE_ID);
+    const ours = (Array.isArray(list) ? list : []).filter((c) => c && c.sourceID === this.src);
     for (const c of ours) {
         const r = await this.cc.callMethod('disconnect', { mainConnectionID: c.mainConnectionID }, 5000).catch((e) => String(e));
         this.opts.log('leftover connection ' + c.mainConnectionID + ' disconnect ' + JSON.stringify(r));
@@ -698,7 +761,7 @@ Audio.prototype.play = function (file) {
 Audio.prototype.playNow = async function (file) {
     await this.init();
     await this.waitAvailable();
-    const r = await this.cc.callMethod('connect', { sourceID: SOURCE_ID, sinkID: SINK_ID }, 5000);
+    const r = await this.cc.callMethod('connect', { sourceID: this.src, sinkID: this.sink }, 5000);
     this.opts.log('connect ' + JSON.stringify(r));
     if (!r || (r.amError !== 'E_OK' && r.amError !== 'E_ALREADY_EXISTS')) throw new Error('audio connect: ' + (r && r.amError));
     this.connId = r.mainConnectionID;
@@ -736,7 +799,7 @@ Audio.prototype.release = async function () {
         if (id === -1) throw new Error('no connection id');
         this.opts.log('disconnect ' + JSON.stringify(await this.cc.callMethod('disconnect', { mainConnectionID: id }, 5000)));
     } catch (e) {
-        this.opts.log('disconnect failed: ' + e + '; sweeping source ' + SOURCE_ID);
+        this.opts.log('disconnect failed: ' + e + '; sweeping source ' + this.src);
         await this.dropLeftovers().catch((e2) => this.opts.log('sweep failed: ' + e2));
     }
 };
@@ -967,6 +1030,12 @@ Daemon.prototype.start = async function () {
     try { mkdirp(this.opts.cacheDir); fs.chmodSync(this.opts.cacheDir, 0o711); } catch (e) { this.log('cache dir: ' + e.message); }
     try { mkdirp(this.opts.logDir); } catch (e) { this.log('log dir: ' + e.message); }
     this.listen();
+    // ytdec decodes on the GPU with the unit's Intel Media SDK (measured on iDrive 7). A head unit without it still
+    // plays the sound (ytdec fails to start twice: "video failed, audio only"); the log says why up front.
+    if (!this.opts.noHwCheck) {
+        const mfx = ['/usr/lib/libmfxhw64.so', '/usr/lib/libmfxhw64.so.1', '/usr/lib64/libmfxhw64.so'].filter((p) => fs.existsSync(p));
+        this.log(mfx.length ? 'video decoder: Intel Media SDK ' + mfx[0] : 'video decoder: no Intel Media SDK (libmfxhw64) on this head unit - the picture may not show, the sound plays');
+    }
     // the uplink learns our fetch uid at start (its 5 s rescan), before anyone signs in
     if (this.childFetch && this.fetchUid === null) { try { this.fetchUid = pickFetchUid(this.opts); } catch (e) { this.log('internet uid: ' + e.message); } }
     this.timers.push(setInterval(() => this.guard(() => this.watchdog()), 1000));

@@ -5,7 +5,14 @@ mgu-deploy tool with the video decoder `ytdec` (built in `../ytdec`). yt-dlp, se
 run on the car; nothing is downloaded for keeps: the cache holds the last few videos played.
 
 - audio: BMW MediaPlayer over SOME/IP (`/usr/lib/someip.node`), source 1046 → sink 1024,
-  `playFile` on `cache/<id>/audio.m4a`.
+  `playFile` on `cache/<id>/audio.m4a`. The interface descriptions come from the first of
+  `/usr/lib/oap-mainapp/src-gen{,/someip}` (iDrive 7) and `/usr/lib/oap-mainapp21/src-gen{/someip,}` (iDrive 8)
+  that has them. At start the log lists the audio manager's sources and sinks
+  (`audio sources <id>:<name> ...; sinks ...; using source 1046, sink 1024`). Where 1046 is not listed and exactly
+  one source is named like `OapGenericMedia`, that one is used. Another route (a head unit that is not the
+  measured iDrive 7) goes in `/var/opt/jap-ridetube-d/state/audio.json`, read at each start of the service:
+  `{"sourceID": n, "sinkID": n, "instance": "OapGenericMedia"}` (any of them). A MediaPlayer without the instance
+  says which ones it has.
 - video: `ytdec --dir cache/<id> --rect WxH [--fill] --log /var/opt/jap-ridetube-d/log/ytdec.log`, which
   writes `/dev/shm/mgu-video-ridetube` for mgu-render; paced by `clock <elapsed_ms> <mono_ms>` lines.
 - media: `/var/opt/jap-ridetube-d/cache/<id>/` {meta.json, thumb.rgba, audio.m4a, index.bin, video.h264, and

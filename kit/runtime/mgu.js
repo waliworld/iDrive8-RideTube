@@ -29,6 +29,10 @@ const { Life } = require('./life');
 
 const sdkLog = logging.getSDKLogger();
 const SPEC = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-spec.json'), 'utf8'));
+// iDrive 8 (kit/tools/build.py --hmi ID8): the HMI has an empty host page per drawn screen and nothing else of the app's;
+// the kit draws the rest (display.js). Components the app names that aren't there (menus, bar buttons) are quiet:
+// their onClick handlers run when the kit presses them (ui._press).
+const ID8 = SPEC.hmi === 'ID8';
 
 /* ---------------- paths ---------------- */
 // cwd of an OAP app is oap_<uid>/data; source is oap_<uid>/source
@@ -152,11 +156,20 @@ class Ui {
         this._topHandlers = [];
         this.timing = { png: 0, push: 0 };    // ms spent encoding / handing images to the HMI
         this._cnText = new HmiText();
+        this._missing = Object.create(null);  // names said once to have no component
+        this._virtual = Object.create(null);  // name -> click handlers of components the HMI hasn't got (iDrive 8)
     }
     comp(name) {
         const c = this.rhmi && this.rhmi.getByName(name);
-        if (!c) log.warn('no RHMI component named ' + name);
+        if (!c && !this._missing[name]) { this._missing[name] = true; log.warn('no RHMI component named ' + name + (ID8 ? ' (iDrive 8: drawn by the kit)' : '')); }
         return c;
+    }
+    /** Press component name as the HMI would: its click handlers (a component the HMI hasn't got: the kit's, iDrive 8). */
+    _press(name, ev) {
+        const c = this.rhmi && this.rhmi.getByName(name);
+        if (c && c.emit) { c.emit('action', ev || {}); return true; }
+        (this._virtual[name] || []).forEach((fn) => { log.info('click ' + name); Promise.resolve().then(() => fn(ev || {})).catch((e) => log.error('click ' + name, e)); });
+        return !!this._virtual[name];
     }
     _try(what, p) {
         let timer;
@@ -194,6 +207,7 @@ class Ui {
     onClick(name, fn) {
         const c = this.comp(name);
         if (c) c.on('action', (ev) => { log.info('click ' + name); Promise.resolve().then(() => fn(ev || {})).catch((e) => log.error('click ' + name, e)); });
+        else if (ID8) (this._virtual[name] = this._virtual[name] || []).push(fn);
     }
     open(stateName) { this._raise(stateName); return this._try('open ' + stateName, this.rhmi.openState(stateName)); }
     /**
@@ -262,7 +276,8 @@ class Ui {
         // coalesce: if a push is in flight, remember only the newest frame
         if (st.busy) { st.next = img; return st.busy; }
         const run = async (frame) => {
-            const c = this.comp(name);
+            // (iDrive 8: no image component - the renderer draws the screen, or nothing shows)
+            const c = ID8 ? this.rhmi && this.rhmi.getByName(name) : this.comp(name);
             if (!c) return;
             // a frame identical to the one on screen (parked car, steady values) is not encoded and
             // pushed again - that is most of a frame's cost. Re-sent every 5 s anyway, and after the
@@ -459,7 +474,9 @@ class Widget {
 function wireSettings(ctx) {
     const { ui, settings } = ctx;
     const schema = settings.schema;
-    // the settings screen, or an app's own menu screen that shows them ("settings": true)
+    // the settings screen, or an app's own menu screen that shows them ("settings": true); iDrive 8 has neither (the app
+    // opens the kit's settings sheet itself)
+    if (ID8) return;
     if (!schema.length || !schema.some((s) => ui.comp('SET_' + s.key.toUpperCase()))) return;
     // choice / number settings are drop-downs (kit/tools/build.py): their rows are the values in this order
     const values = (s) => (s.type === 'choice' ? (s.options || []).map((o) => o[0]) : s.type === 'number' ? s.steps || [] : null);
@@ -522,7 +539,8 @@ async function runInner(impl) {
     } catch (e) { /* none missing */ }
     // lifecycle as BMW's M Laptimer does it: report the status (life.js) as soon as the app
     // status channel is up, report HMI visibility, and exit when MainApp asks us to shut down
-    const life = new Life(app, log);
+    // (iDrive 8: the status is reported where the SDK can; a unit whose SDK refuses it is not asked again)
+    const life = new Life(app, log, { once: ID8 });
     const active = () => life.sync(true);
     app.on('appStatusProxyReady', active);
     app.on('shutdown', () => { log.info('shutdown requested by MainApp'); setTimeout(() => process.exit(0), 200); });
@@ -663,7 +681,7 @@ async function runInner(impl) {
 
     // visibility of our states (pauses rendering when the user leaves); the HMI's settings screen too (the
     // drawn screen gives way to it: display.js)
-    const tracked = (SPEC.screens || []).concat(SPEC.settings && SPEC.settings.length ? [{ name: 'SETTINGS' }] : []);
+    const tracked = (SPEC.screens || []).concat(SPEC.settings && SPEC.settings.length && !ID8 ? [{ name: 'SETTINGS' }] : []);
     tracked.forEach((s) => {
         const st = ui.comp(s.name);
         if (st && st.on) st.on('visible', (ev) => { if (ev && ev.visible) ui._raise(s.name); ui._setVisible(s.name, !!(ev && ev.visible)); });
@@ -696,6 +714,15 @@ async function runInner(impl) {
         });
     });
 
+    // never let a UI call that the HMI does not answer block the app start:
+    // MainApp shows "loading app" until initialized() is called
+    const step = (what, p, ms) => {
+        let timer;
+        return Promise.race([
+            Promise.resolve(p).then(() => log.info(what + ' done')),
+            new Promise((res) => { timer = setTimeout(() => { log.warn(what + ' still pending after ' + ms + ' ms, continuing'); res(); }, ms); }),
+        ]).catch((e) => log.error(what, e)).then(() => clearTimeout(timer));
+    };
     // entry points (tiles): map them to the main screen once, up front, like
     // BMW's own apps do; a tap then only opens the mapped state
     const mainName = (SPEC.screens && SPEC.screens[0] && SPEC.screens[0].name) || 'MAIN';
@@ -706,7 +733,24 @@ async function runInner(impl) {
     } catch (e) { log.warn('no rhmiData/application.json: ' + e); }
     const mainState = ui.comp(mainName);
     const mapped = {};
-    await Promise.all(entryUuids.map((uuid) => ui.rhmi.mapEntryState(uuid, mainState)
+    // iDrive 8: the host page's resources first, then the tile the manager hands over made usable as the MGU Store and
+    // IterioDev's iDrive 8 apps do it (init, mapped to the page, its text and icon, ENABLED). Without the SDK's entry
+    // point list (iDrive 7's SDK) the plain mapping below does it, as before.
+    if (ID8) {
+        await step('host page resources', mainState && mainState.updateResources ? mainState.updateResources() : null, 4000);
+        const eps = typeof app.getEntryPoints === 'function' ? app.getEntryPoints() || [] : [];
+        const ours = eps.find((ep) => ep && ep.getDescription && entryUuids.indexOf(ep.getDescription().uuid) >= 0);
+        if (ours) {
+            const d = ours.getDescription();
+            await step('entry point ' + d.uuid, Promise.resolve(ours.init())
+                .then(() => ui.rhmi.mapEntryState(d.uuid, mainState)).then(() => { mapped[d.uuid] = true; })
+                .then(() => Promise.resolve(ours.entryPoint && ours.entryPoint.setText(d.textId))
+                    .then(() => (d.icon && ours.entryPoint ? ours.entryPoint.setIcon(d.icon) : null))
+                    .catch((e) => log.warn('entry point text / icon: ' + e)))
+                .then(() => ours.setAvailability('ENABLED')), 4000);
+        } else log.warn('iDrive 8: no entry point handed over by the manager (the tile may do nothing)');
+    }
+    await Promise.all(entryUuids.filter((uuid) => !mapped[uuid]).map((uuid) => ui.rhmi.mapEntryState(uuid, mainState)
         .then(() => { mapped[uuid] = true; log.info('mapped entry ' + uuid + ' -> ' + mainName); })
         .catch((e) => log.error('map entry state', e))));
     let opening = null;
@@ -737,22 +781,13 @@ async function runInner(impl) {
         openEntry(uuid);
     });
 
-    // never let a UI call that the HMI does not answer block the app start:
-    // MainApp shows "loading app" until initialized() is called
-    const step = (what, p, ms) => {
-        let timer;
-        return Promise.race([
-            Promise.resolve(p).then(() => log.info(what + ' done')),
-            new Promise((res) => { timer = setTimeout(() => { log.warn(what + ' still pending after ' + ms + ' ms, continuing'); res(); }, ms); }),
-        ]).catch((e) => log.error(what, e)).then(() => clearTimeout(timer));
-    };
     // push every screen's and pop-up's rows to the HMI once (BMW apps do this via
     // updateResources before opening a state); until then the HMI has no rows,
     // lists render empty and a pop-up opens blank (its text update: INVALID_MODELID)
     // (menu screens only: doing it on a canvas screen before its first image
     // makes every later createResourceHandles fail with INVALID_VALUE)
     await step('screen resources', Promise.all((SPEC.screens || []).filter((s) => s.kind !== 'canvas')
-        .concat(SPEC.settings && SPEC.settings.length ? [{ name: 'SETTINGS' }] : [], SPEC.popups || [])
+        .concat(SPEC.settings && SPEC.settings.length && !ID8 ? [{ name: 'SETTINGS' }] : [], SPEC.popups || [])
         .map((s) => ui.comp(s.name)).filter((st) => st && st.updateResources)
         .map((st) => st.updateResources())), 4000);
     await step('settings screen', wireSettings(ctx), 3000);

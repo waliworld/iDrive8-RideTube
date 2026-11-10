@@ -5,9 +5,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
-const { Daemon, pruneCache, listCache, feedItems, feedShelves, pickFetchUid, fetchRequest, isPlayable } = require('../ytd.js');
+const { Daemon, Audio, pruneCache, listCache, feedItems, feedShelves, pickFetchUid, fetchRequest, isPlayable } = require('../ytd.js');
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ytd-'));
+process.env.MGU_YT_AUDIO = path.join(tmp, 'audio.json');      // (none: the iDrive 7 route)
 const cache = path.join(tmp, 'cache');
 const srcGen = path.join(tmp, 'src-gen');
 const ytlog = path.join(tmp, 'ytdec.calls');
@@ -31,7 +32,11 @@ const someip = {
         init: async () => {},
         isAvailable: async () => true,
         subscribe: (s) => { subs[s.name] = s.onReceive; },
-        getValue: async (n) => { assert.strictEqual(n, 'listOfMainConnections'); return conns.slice(); },
+        getValue: async (n) => {
+            if (n === 'listOfMainSources') return [{ sourceID: 1046, name: 'OapGenericMedia' }, { sourceID: 129, name: 'Tuner' }];
+            if (n === 'listOfMainSinks') return [{ sinkID: 1024, name: 'AMP' }];
+            assert.strictEqual(n, 'listOfMainConnections'); return conns.slice();
+        },
         callMethod: async (m, a) => {
             calls.push({ inst: inst, m: m, a: a });
             if (m === 'connect') { const id = nextConn++; conns.push({ mainConnectionID: id, sourceID: a.sourceID }); return { mainConnectionID: id, amError: 'E_OK' }; }
@@ -1245,6 +1250,56 @@ async function main() {
                 { thumbnailOverlayResumePlaybackRenderer: { percentDurationWatched: 40 } }] } },
             onSelectCommand: { watchEndpoint: { videoId: 'AUTOAUTO003', startTimeSeconds: 120 } } } }] };
         assert.strictEqual(feedItems(j)[0].watched_pct, 40); assert.strictEqual(feedItems(j)[0].start_s, 120);
+    });
+
+    await t('iDrive 8: interface files found in oap-mainapp21/src-gen/someip; the route from audio.json; a missing player instance named', async () => {
+        const root = path.join(tmp, 'id8'), id7 = path.join(root, 'oap-mainapp', 'src-gen'), id8 = path.join(root, 'oap-mainapp21', 'src-gen', 'someip');
+        fs.mkdirSync(id8, { recursive: true });
+        fs.writeFileSync(path.join(id8, 'org_genivi_am_commandinterface_CommandControl.json'), JSON.stringify({ name: 'cc' }));
+        fs.writeFileSync(path.join(id8, 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json'), JSON.stringify({ name: 'mp', instances: { OapGenericMedia: {}, Usb: {} } }));
+        const lines = [], conf = path.join(root, 'audio.json'), built = [];
+        const sip = { buildProxy: async (cfg, inst) => { built.push([cfg.name, inst]); return someip.buildProxy(cfg, inst); } };
+        const mk = () => new Audio({ someip: sip, srcGen: null, srcGens: [id7, id8], audioConf: conf, availWaitMs: 500, log: (m) => lines.push(m) }, { time() {}, state() {}, error() {} });
+        let a = mk();
+        await a.init();
+        assert.deepStrictEqual(built, [['cc', '1'], ['mp', 'OapGenericMedia']]);
+        assert.ok(lines.some((l) => l === 'interfaces from ' + id8), lines.join('|'));
+        assert.ok(lines.some((l) => /^audio sources 1046:OapGenericMedia 129:Tuner; sinks 1024:AMP; using source 1046, sink 1024$/.test(l)), lines.join('|'));
+        calls.length = 0;
+        await a.playNow('/x/audio.m4a');
+        assert.deepStrictEqual(called('connect')[0].a, { sourceID: 1046, sinkID: 1024 });
+        await a.release();
+        // a hand-written route (another head unit), read at the next start of the service
+        fs.writeFileSync(conf, JSON.stringify({ sourceID: 2001, sinkID: 1999, instance: 'Usb' }));
+        a = mk(); built.length = 0; lines.length = 0;
+        await a.init();
+        assert.deepStrictEqual(built[1], ['mp', 'Usb']);
+        calls.length = 0;
+        await a.playNow('/x/audio.m4a');
+        assert.deepStrictEqual(called('connect')[0].a, { sourceID: 2001, sinkID: 1999 });
+        await a.release();
+        assert.ok(lines.some((l) => /using source 2001, sink 1999 \(audio\.json\)$/.test(l)), lines.join('|'));
+        // an instance the player does not have: the error names the ones it has
+        fs.writeFileSync(conf, JSON.stringify({ instance: 'Nope' }));
+        await assert.rejects(mk().init(), /MediaPlayer has no instance Nope \(it has OapGenericMedia, Usb; set "instance" in /);
+        fs.unlinkSync(conf);
+        // nowhere: the folders it looked in
+        await assert.rejects(new Audio({ someip: sip, srcGens: [path.join(root, 'none')], audioConf: conf, log() {} }, {}).init(), /no org_genivi_am_commandinterface_CommandControl\.json in /);
+    });
+
+    await t('iDrive 8: source 1046 not listed, one source named like the generic OAP media one: that one; none: kept and said', async () => {
+        const lines = [];
+        const mkSip = (sources) => ({ buildProxy: async (cfg, inst) => Object.assign(await someip.buildProxy(cfg, inst), {
+            getValue: async (n) => (n === 'listOfMainSources' ? sources : n === 'listOfMainSinks' ? null : conns.slice()) }) });
+        let a = new Audio({ someip: mkSip([{ sourceID: 3050, name: 'OAP_GENERIC_MEDIA' }, { sourceID: 129, name: 'Tuner' }]), srcGen: srcGen, audioConf: path.join(tmp, 'none.json'), availWaitMs: 500, log: (m) => lines.push(m) }, { time() {}, state() {}, error() {} });
+        await a.init();
+        assert.strictEqual(a.src, 3050);
+        assert.ok(lines.some((l) => l === 'source 1046 is not on this head unit: using 3050 (OAP_GENERIC_MEDIA)'), lines.join('|'));
+        lines.length = 0;
+        a = new Audio({ someip: mkSip([{ sourceID: 129, name: 'Tuner' }]), srcGen: srcGen, audioConf: path.join(tmp, 'none.json'), availWaitMs: 500, log: (m) => lines.push(m) }, { time() {}, state() {}, error() {} });
+        await a.init();
+        assert.strictEqual(a.src, 1046);
+        assert.ok(lines.some((l) => /^source 1046 is not listed on this head unit; set "sourceID" in /.test(l)), lines.join('|'));
     });
 
     c.destroy();

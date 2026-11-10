@@ -15,9 +15,12 @@
  * counts only once the app was on screen (the Store does the same, store.js _sawForeground).
  */
 class Life {
-    constructor(app, log) {
+    /** opts.once: a status the SDK refuses is not sent again (iDrive 8's SDK may have no app status channel) */
+    constructor(app, log, opts) {
         this.app = app;
         this.log = log;
+        this.once = !!(opts && opts.once);
+        this.off = false;
         this.shown = null;      // null: not shown yet
         this.widget = false;
         this.jobs = new Set();
@@ -28,6 +31,7 @@ class Life {
 
     /** Send the status if it changed (force: send it anyway, e.g. once the status channel is up). */
     sync(force) {
+        if (this.off) return Promise.resolve();
         const on = this.want();
         if (!force && on === this.sent) return Promise.resolve();
         this.sent = on;
@@ -35,7 +39,10 @@ class Life {
         return Promise.resolve()
             .then(() => (on ? this.app.registerActive() : this.app.registerInactive()))
             .then(() => this.log.info('registered ' + (on ? 'active' : 'inactive') + ' (' + why + ')'))
-            .catch((e) => { this.sent = null; this.log.warn('app status: ' + e); });   // sent again next time
+            .catch((e) => {
+                this.sent = null;                                                   // sent again next time
+                if (this.once) { this.off = true; this.log.warn('app status: ' + e + ' - not reported on this head unit'); } else this.log.warn('app status: ' + e);
+            });
     }
 
     setShown(on) {

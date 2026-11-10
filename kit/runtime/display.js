@@ -36,7 +36,15 @@
  * touch while open (a finger drags their lists); push left goes back. Doom ("chrome": false)
  * keeps the upstream dialect. Should the renderer's foreground gate not have the app in front
  * while its screen shows, the app draws in the HMI's own image meanwhile (blocked).
+ *
+ * iDrive 8 (app-spec.json "hmi": "ID8", kit/tools/build.py --hmi ID8): the 2880 x 960 screen. The HMI keeps an empty
+ * host page of the app's; the kit always runs the screen there. The renderer's surface covers the app area only
+ * (y 76..840: the HMI's status strip above and its climate bar below stay the HMI's), the page is wider (PAGE.w 2080,
+ * so it fills the width at the same height), there is no HMI bar or back column: the header has the kit's own back
+ * button (it closes the screen, as the HMI's back arrow does), and the controller is not held (touch only).
  */
+const fs = require('fs');
+const path = require('path');
 const { Recorder, play } = require('./record');
 const { Canvas } = require('./canvas');
 const { RenderClient } = require('./renderd');
@@ -45,14 +53,19 @@ const { drawCredit } = require('./credits');
 
 // FrontCCU deflection: short / long push per direction (DREHGEBER enums as numbers)
 const TILT = { 1: 'N', 2: 'N', 4: 'E', 5: 'E', 7: 'S', 8: 'S', 10: 'W', 11: 'W' };
-const PAGE = { w: 1600, h: 520 };
+// the head unit the app was built for (MGU_HMI: tests)
+const HU = process.env.MGU_HMI || (() => {
+    try { return JSON.parse(fs.readFileSync(path.join(__dirname, 'app-spec.json'), 'utf8')).hmi || 'ID7'; } catch (e) { return 'ID7'; }
+})();
+const ID8 = HU === 'ID8';
+const PAGE = { w: ID8 ? 2080 : 1600, h: 520 };
 // bar buttons that only turn pages (Next page, Previous page)
 const PAGER = ['BTN_PAGE', 'BTN_PREV'];
 // px between the header (and the screen's bottom) and a page with no bar under it
 const PAGE_GAP = 6;
 
 /* HMI geometry on the 1920 x 720 centre display (measured on the unit's HMI) */
-const HMI = {
+const HMI7 = {
     screen: { w: 1920, h: 720 },
     img: { x: 124, y: 82, w: 1600, h: 520 },   // canvas screen's image component
     // bar buttons: from x 132, each as wide as its label + 180 px. The label's width in the HMI
@@ -65,13 +78,27 @@ const HMI = {
     headBg: '#000000',                          // the HMI's title / status strip
     status: { x: 1340, h: 76 },                 // status icons top right (notifications .. clock)
 };
+/* iDrive 8's 2880 x 960 centre display: the app area as mgu-render and IterioDev's iDrive 8 apps have it */
+const HMI8 = {
+    screen: { w: 2880, h: 960 },
+    area: { x: 0, y: 76, w: 2880, h: 764 },     // the renderer's surface: under the status strip, over the climate bar
+    img: { x: 0, y: 76, w: 2880, h: 764 },      // (no image component: the area, for a renderer of another screen size)
+    btn: { x: 0, pad: 180, size: 40, k: 1.465 },  // (no HMI bar: the kit's slim bar, from the left edge)
+    left: 0,                                    // no back arrow column
+    back: 112,                                  // the kit's back button, at the header's left end (surface px)
+    barTop: 764,
+    colEnd: 0,
+    headBg: '#000000',
+    status: { x: 2880, h: 0 },                  // the status icons are above the surface
+};
+const HMI = ID8 ? HMI8 : HMI7;
 /* full-screen layout, in the surface's pixels (it covers the whole screen) */
 const FULL = {
     headH: 80,                                  // header in the HMI's title strip
     barH: 48,                                   // slim button bar
     // part of the app's 1600 x 520 drawing shown: the tab bar (y < 38) moves to the header and
     // the side margins are trimmed a little, so the content can be scaled up further
-    src: { x: 12, y: 38, w: 1576, h: 482 },
+    src: { x: 12, y: 38, w: PAGE.w - 24, h: 482 },
 };
 const LAYOUTS = ['full', 'standard'];
 
@@ -249,7 +276,7 @@ class Display {
     }
     /** HMI back (the controller pushed left): the app's screen closes as with the HMI's back arrow. */
     _back() {
-        this.log.info('display: back (controller pushed left)');
+        this.log.info('display: back (controller pushed left, or the kit\'s back button)');
         Promise.resolve(this.ui.close(this.screen.name)).catch((e) => this.log.warn('back: ' + e));
     }
     /** A sheet can be shown now (else the app falls back to the HMI's own screens). */
@@ -307,7 +334,11 @@ class Display {
     /** Press bar button id, as the HMI does for a tap or the controller's press. */
     _click(id) {
         const c = this.ui.rhmi && this.ui.rhmi.getByName(id);
-        if (!c || !c.emit) return;
+        if (!c || !c.emit) {
+            // iDrive 8: a button the HMI hasn't got - its handlers are the kit's (mgu.js Ui._press)
+            if (ID8 && this.ui._press) { if (this.sheet && !this.sheet.keepOnBar) this.closeSheet(); this.ui._press(id); }
+            return;
+        }
         if (this.sheet && !this.sheet.keepOnBar) this.closeSheet();
         c.emit('action', {});
     }
@@ -433,6 +464,15 @@ class Display {
             const pl = this.place, sx = x * pl.scale + pl.ox, sy = y * pl.scale + pl.oy;
             // the app takes the whole gesture (a stream under the page): screen px, phase 1 down, 2 move, 3 up
             if (this.onTouch && this.onTouch(phase, sx, sy)) return;
+            // iDrive 8: the kit's back button (a sheet over the page closes first, as push left does) - only while the
+            // header is drawn (this.app: a frame composed with it), not over a page drawn whole (the player)
+            if (this.backW() && this.app && sy < this.headH() && sx < this.left() - pl.x + this.backW()) {
+                if (phase === 1) { this.ownDown = 'back'; this.downAt = { x, y }; this.dragging = false; } else if (phase === 3 && this.ownDown === 'back') {
+                    this.ownDown = null; this.pressed = 'back'; this.pressedT = Date.now(); this._repaint();
+                    if (this.sheet) this.closeSheet(); else this._back();
+                }
+                return;
+            }
             const bar = sy >= pl.h - this.barH() ? this.buttons().find((b) => sx >= b.x - this.barOff - pl.x && sx < b.x - this.barOff - pl.x + b.w) : null;
             // the header's tabs (Settings among them) work over a sheet too
             const tab = !bar && (this.tabs || []).find(inside);
@@ -535,12 +575,13 @@ class Display {
      *  take their place), so none shows around an HMI popup; shown for every other path. */
     _hmiBar() {
         const hide = this.ownable() && !this.blocked;
-        if (this.hmiBarHidden === hide) return;
+        if (ID8 || this.hmiBarHidden === hide) return;     // (iDrive 8: the host page has no bar)
         this.hmiBarHidden = hide;
         (this.screen.buttons || []).forEach((b) => { if (this.ui.visible) this.ui.visible(b[0], !hide); });
     }
 
     layout() {
+        if (ID8) return 'full';                 // (iDrive 8: the kit always runs the screen)
         const v = this.settings.get('layout') || 'full';
         return LAYOUTS.indexOf(v) >= 0 ? v : 'full';
     }
@@ -553,13 +594,14 @@ class Display {
         if (v === 'standard' || scr.w !== HMI.screen.w || scr.h !== HMI.screen.h) {
             pl = { x: HMI.img.x, y: HMI.img.y, w: HMI.img.w, h: HMI.img.h, scale: 1, ox: 0, oy: 0, full: false };
         } else {
-            // the surface covers the whole screen, so the HMI's own bar can't show under the back
-            // arrow column; the page content goes right of that column
-            const w = scr.w - this.left(), h = scr.h, src = FULL.src;
+            // the surface covers the whole screen (iDrive 8: the app area), so the HMI's own bar can't show under the
+            // back arrow column; the page content goes right of that column
+            const A = HMI.area || { x: 0, y: 0, w: scr.w, h: scr.h };
+            const w = A.w - this.left(), h = A.h, src = FULL.src;
             const ah = h - this.headH() - this.barH();
             const s = Math.floor(Math.min(w / src.w, ah / src.h) * 1000) / 1000;
             pl = {
-                x: 0, y: 0, w: scr.w, h, full: true,
+                x: A.x, y: A.y, w: A.w, h, full: true,
                 scale: s,
                 ox: this.left() + Math.round((w - src.w * s) / 2 - src.x * s),
                 oy: Math.round(this.headH() + (ah - src.h * s) / 2 - src.y * s),
@@ -584,7 +626,7 @@ class Display {
             // "fill": the page's whole canvas is the screen (its 1600 across the 1920), drawn from the top-left
             // corner; extra = the logical px it has below its 520
             if (this.fill()) {
-                const k = scr.w / PAGE.w;
+                const k = A.w / PAGE.w;
                 Object.assign(pl, { scale: k, ox: 0, oy: 0, extra: Math.floor(h / k - PAGE.h) });
                 delete pl.oyMid; delete pl.oyTop;
             }
@@ -821,16 +863,26 @@ class Display {
         const tb = this.own() ? this._tabList() : r.chrome.tabs || { tabs: [], sel: -1, badges: [] };
         // compact header in the HMI strip's own black, only as wide as its name, tabs and badges:
         // right of it the HMI's strip shows through (radio station, phone signal, status icons)
-        const hx = this.left() - pl.x, whole = this.whole(), fill = this.fill();
-        const end = fill ? 0 : G.header(c, Object.assign({}, t, { bg: HMI.headBg }), hx, 0, (whole ? W : HMI.status.x - pl.x) - hx, FULL.headH,
+        const hx = this.left() - pl.x, whole = this.whole(), fill = this.fill(), bw = this.backW();
+        const end = fill ? 0 : G.header(c, Object.assign({}, t, { bg: HMI.headBg }), hx + bw, 0, (whole ? W : HMI.status.x - pl.x) - hx - bw, FULL.headH,
             this.screen.title || this.spec.title, tb.tabs, tb.sel, tb.badges, true, true);
+        if (bw) {
+            // iDrive 8: the kit's back button (closes the screen, as the HMI's back arrow does on iDrive 7)
+            const lit = this.pressed === 'back' && Date.now() - this.pressedT < 300;
+            c.fillRect(hx, 0, bw, FULL.headH, HMI.headBg);
+            if (lit) c.roundRect(hx + 14, 8, bw - 28, FULL.headH - 16, 14, G.withAlpha(t.sel || t.accent, 0.35));
+            const ax = hx + bw / 2 + 6, ay = FULL.headH / 2;
+            c.polyline([[ax + 6, ay - 18], [ax - 12, ay], [ax + 6, ay + 18]], 6, '#ffffff');
+            c.fillRect(hx + bw - 2, 14, 2, FULL.headH - 28, G.withAlpha('#ffffff', 0.22));
+        }
         // the HMI's own title is in the strip under the header: a narrower header (a sheet: no tabs) stays
         // as wide as the app's widest, so none of that title shows beside it
         if (!this.sheet && !fill) this.headMax = Math.max(this.headMax || 0, end);
         // and never narrower than that title itself (HMI font, measured: YouTube's ends at x 305), else its tail
         // shows right of a short header with no tabs
         const hmiTitle = hx + 20 + c.textWidth(this.screen.title || this.spec.title || '', HMI.btn.size, { font: 'label' }) * HMI.btn.k + 24;
-        const sx = this.headEnd = whole || fill ? W : Math.min(HMI.status.x - pl.x, Math.ceil(Math.max(end, this.headMax || 0, hmiTitle)));
+        // (iDrive 8: the header is the app's across the whole width, nothing of the HMI shows in it)
+        const sx = this.headEnd = whole || fill || ID8 ? W : Math.min(HMI.status.x - pl.x, Math.ceil(Math.max(end, this.headMax || 0, hmiTitle)));
         if (sx > end && !fill) { c.fillRect(end, 0, sx - end, FULL.headH - 2, HMI.headBg); c.fillRect(end, FULL.headH - 2, sx - end, 2, G.withAlpha('#ffffff', 0.22)); }
         // the tab the controller is on (the kit holds it: Display._ccu)
         const ft = this.focusTab != null && (!this.sheet || this.sheetHead) && (c.tabRects || []).find((q) => q.i === this.focusTab);
@@ -930,6 +982,8 @@ class Display {
     fill() { return !!(this.screen && this.screen.fill === true && this.screen.hmi === false); }
     /** Where the page starts: right of the HMI's back arrow column, or at 0 for "fill". */
     left() { return this.fill() ? 0 : HMI.left; }
+    /** iDrive 8: the kit's back button at the header's left end (surface px), where the header shows; else 0. */
+    backW() { return ID8 && this.headH() ? HMI.back : 0; }
 
     /**
      * The HMI's bar buttons in screen pixels, unscrolled: [{ id, label, x, w }]. Where the kit runs
@@ -956,4 +1010,4 @@ class Display {
     onLayout(fn) { this.layoutHandlers.push(fn); }
 }
 
-module.exports = { Display, HMI, FULL };
+module.exports = { Display, HMI, FULL, PAGE, ID8 };

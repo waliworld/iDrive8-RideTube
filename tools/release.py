@@ -3,7 +3,8 @@
 (without node_modules/oap-sdk: the head unit makes it from an app already on the car), the service's tool kit
 and the app icon. jap-node22 (required by jap-ridetube-d) comes from the JustAnotherPU/mgu-apps source. Upload every file of dist/release/ as an asset of a GitHub release tagged `catalog`.
 
-Build first:  python3 kit/tools/build.py jap_ridetube                      (dist/jap_ridetube@<v>.tgz)
+Build first:  python3 kit/tools/build.py jap_ridetube                      (dist/jap_ridetube@<v>.tgz, iDrive 7)
+              python3 kit/tools/build.py --hmi ID8 jap_ridetube            (dist/jap_ridetube8@<v>.tgz, iDrive 8)
               (cd native/ytdec && make target)
               (cd native/jap-ridetube-d && MGU_STORE=... ./build.sh)      (its dist/)
 Then:         python3 tools/release.py [--base URL]
@@ -15,6 +16,12 @@ import argparse, gzip, hashlib, io, json, os, shutil, sys, tarfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = 'JustAnotherPU/ridetube'
 APP = 'jap_ridetube'
+# one Store entry per head unit, built from the same app (an entry's requirements hold for every car it installs on: the
+# controller gate is iDrive 7's only)
+APPS = (
+    (APP, ['ID7'], lambda d: {'jap-ridetube-d': d, 'mgu-render': '0.6.11', 'mgu-inputgate': '1.0.0'}),
+    (APP + '8', ['ID8'], lambda d: {'jap-ridetube-d': d, 'mgu-render': '0.6.11'}),
+)
 TOOLS = ('jap-ridetube-d',)
 
 
@@ -60,14 +67,17 @@ def main():
 
     app = json.load(open(os.path.join(ROOT, 'apps', APP, 'app.json')))
     tools = {t: json.load(open(os.path.join(ROOT, 'native', t, 'component.json'))) for t in TOOLS}
-    pkg = os.path.join(ROOT, 'dist', '%s@%s.tgz' % (APP, app['version']))
-    if not os.path.isfile(pkg):
-        sys.exit('release.py: %s missing (python3 kit/tools/build.py %s)' % (pkg, APP))
-    strip_sdk(pkg, os.path.join(out, os.path.basename(pkg)), mtime)
-    # the local build's packages hold BMW's oap-sdk: only dist/release/ is ever uploaded, so they go
-    for f in (pkg, pkg[:-4] + '.mgu'):
-        if os.path.exists(f):
-            os.remove(f)
+    pkgs = {}
+    for aid, hmi, _ in APPS:
+        pkg = os.path.join(ROOT, 'dist', '%s@%s.tgz' % (aid, app['version']))
+        if not os.path.isfile(pkg):
+            sys.exit('release.py: %s missing (python3 kit/tools/build.py%s %s)' % (pkg, ' --hmi ID8' if hmi == ['ID8'] else '', APP))
+        strip_sdk(pkg, os.path.join(out, os.path.basename(pkg)), mtime)
+        pkgs[aid] = os.path.basename(pkg)
+        # the local build's packages hold BMW's oap-sdk: only dist/release/ is ever uploaded, so they go
+        for f in (pkg, pkg[:-4] + '.mgu'):
+            if os.path.exists(f):
+                os.remove(f)
     for t, c in tools.items():
         kit = os.path.join(ROOT, 'native', t, 'dist', '%s@%s.tgz' % (t, c['version']))
         if not os.path.isfile(kit):
@@ -78,11 +88,12 @@ def main():
     assert os.path.getsize(os.path.join(out, icon)) <= 128 * 1024
 
     comps = [{
-        'id': APP, 'kind': 'app', 'title': app['title'], 'description': app['description'], 'version': app['version'],
-        'artifact': artifact(os.path.join(out, os.path.basename(pkg)), a.base),
-        'requires': {'jap-ridetube-d': tools['jap-ridetube-d']['version'], 'mgu-render': '0.6.11', 'mgu-inputgate': '1.0.0'},
-        'uninstallable': True, 'mguHmi': ['ID7'], 'icon': icon, 'iconSha256': sha256(os.path.join(out, icon)),
-    }]
+        'id': aid, 'kind': 'app', 'title': app['title'],
+        'description': app['description'] if hmi == ['ID7'] else app['id8'].get('description', app['description']),
+        'version': app['version'], 'artifact': artifact(os.path.join(out, pkgs[aid]), a.base),
+        'requires': req(tools['jap-ridetube-d']['version']),
+        'uninstallable': True, 'mguHmi': hmi, 'icon': icon, 'iconSha256': sha256(os.path.join(out, icon)),
+    } for aid, hmi, req in APPS]
     for t, c in tools.items():
         e = {'id': t, 'kind': 'tool', 'title': c['title'], 'description': c['description'], 'version': c['version'],
              'artifact': artifact(os.path.join(out, '%s@%s.tgz' % (t, c['version'])), a.base),

@@ -31,6 +31,11 @@
  *   MAIN  HMI menu (Search): the HMI's speller, Now playing, Results, Home, Subscriptions, Watch later, recent
  *         searches / suggestions, then Sign in / Sign out (pressed twice).
  *
+ * iDrive 8 (built with kit/tools/build.py --hmi ID8, its own app jap_ridetube8): the HMI has only the empty host page
+ * of VIEW; the kit runs the whole screen (touch only, its own back button) on a wider page (PAGE.w 2080: five tiles a
+ * row). Search opens the kit's on-screen keyboard (recent searches as chips; typing only while parked), and the
+ * rail's last entry, Settings, opens a card with the account (Sign in / Sign out) and the settings sheet.
+ *
  * Video only while parked (kit parked.js), unless the "Video while driving" setting is on (for a car coded
  * for video in motion): driving off turns the picture off (daemon `video off`,
  * renderer DROP_VIDEO), the sound plays on; parked again, it comes back. The app stays ACTIVE
@@ -43,18 +48,21 @@ const mgu = require('./kit/mgu');
 const G = require('./kit/gauges');
 const QR = require('./kit/qr');
 const { setImage } = require('./kit/record');
-const { HMI } = require('./kit/display');
+const { HMI, PAGE, ID8 } = require('./kit/display');
+const { listSheet, cardSheet } = require('./kit/sheet');
+const { keyboardSheet } = require('./kit/keyboard');
 const Parked = require('./kit/parked');
 const { Ctl, Model, clock, SOCKET, FEEDS, SHELF_MAX } = require('./yt');
 const { spell } = require('./speller');
 
-const W = 1600, H = 520;
-const BOX = { x: 12, y: 38, w: 1576, h: 432 };          // the video, in the page's visible part (y 38..520)
+const W = PAGE.w, H = PAGE.h;                             // 1600 x 520 (iDrive 8: 2080 x 520)
+const BOX = { x: 12, y: 38, w: W - 24, h: 432 };         // the video, in the page's visible part (y 38..520)
 const VID = 1, VPATH = process.env.MGU_YT_VIDEO || '/dev/shm/mgu-video-ridetube';     // (env: tests)
 const POOL0 = 8, POOL = 56;                               // picture ids POOL0.. for the thumbs drawn (a pool, by video)
 const TOP = 38;                                          // the page shows from here down (the kit: y 38..520 + extra)
 const RAIL_W = 116;                                      // the icon rail, x 12..116
-const X0 = 136, TW = 320, TH = 180, PITCH = 348, PER_ROW = 4;   // tiles: 16:9 thumbs, four a row, the fifth peeking
+const X0 = 136, TW = 320, TH = 180, PITCH = 348;          // tiles: 16:9 thumbs, four a row, the fifth peeking
+const PER_ROW = Math.floor((W - X0 - TW) / PITCH) + 1;      // (4; iDrive 8's wider page: 5, the sixth peeking)
 const TILE_H = TH + 98, HEAD_H = 50, SHELF_GAP = 30, GRID_GAP = 22;   // a tile with its text; a shelf's title row
 const OVERLAY_MS = 4000;                                 // the player's controls hide this long after a tap (playing)
 const SEARCH_MS = 8000;                                  // a search with no answer by then is an error on screen
@@ -145,6 +153,15 @@ mgu.run({
             show('results');
             ui.open('VIEW');
         }
+        // the keyboard: the HMI's speller (MAIN's Search), or on iDrive 8 the kit's (recent searches as chips; typing
+        // only while parked, as the HMI's own speller does it)
+        const typingLocked = () => parked.moving();
+        function openSearch() {
+            if (!ID8) { ui.open('MAIN'); return; }
+            const ok = ctx.sheet(keyboardSheet({ title: 'Search', hint: 'Search videos', action: 'Search', chips: slots,
+                locked: typingLocked, lockedText: 'Typing works when parked - or pick a recent search', onDone: (q) => search(q) }));
+            if (!ok) log.warn('search: the keyboard needs the GPU renderer (mgu-render)');
+        }
         ui.onClick('BTN_SEARCH', () => spell(ctx.app, 'Search videos')
             .then((t) => search(t))
             .catch((e) => { log.error('speller', e); ui.text('MAIN_INFO', 'The keyboard did not open: ' + (e.message || e)); }));
@@ -183,6 +200,9 @@ mgu.run({
         function rect() {
             const pl = ctx.display && ctx.display.place, s = (pl && pl.scale) || 1;
             const even = (v, max) => Math.min(max, Math.max(16, Math.round(v / 2) * 2));
+            // iDrive 8: the app area is 2880 x 764, wider than ytdec's 2048 and than any video: a 16:9 frame as tall
+            // as the area (op 19 fits it, centred), so nothing is decoded only to be shown smaller
+            if (pl && pl.full && ID8) return even(Math.min(2048, pl.h * 16 / 9), 2048) + 'x' + even(pl.h, 2048);
             if (pl && pl.full) return even(pl.w, 2048) + 'x' + even(pl.h, 2048);
             return even(BOX.w * s, 1920) + 'x' + even(BOX.h * s, 720);
         }
@@ -215,12 +235,34 @@ mgu.run({
             const a = model.auth.state !== 'signed_in' ? 'Sign in' : signOutArmed ? 'Press again to sign out' : 'Sign out';
             if (a !== lastAcct) { lastAcct = a; ui.text('BTN_ACCOUNT', a); }
         }
+        // iDrive 8: the rail's Settings - the account (sign in, sign out pressed twice) and the settings sheet
+        let menuArmed = 0;
+        function openMenu() {
+            const signedIn = () => model.auth.state === 'signed_in';
+            ctx.sheet(cardSheet({
+                title: 'Settings', heading: 'RideTube',
+                subtitle: () => (!model.connected ? 'The RideTube service (jap-ridetube-d) is not running' : signedIn() ? 'Signed in on the car' : 'Not signed in'),
+                rows: () => [['Account', signedIn() ? 'Signed in' : 'Signed out'], ['Now playing', model.active() ? model.title || model.id : 'Nothing'],
+                    ['Version', mgu.SPEC.version]],
+                note: 'Unofficial client for YouTube · Skip data: SponsorBlock (sponsor.ajay.app), CC BY-NC-SA 4.0',
+                actions: () => [
+                    signedIn()
+                        ? { label: menuArmed > Date.now() ? 'Press again to sign out' : 'Sign out', color: '#ff6b6b', run: () => {
+                            if (menuArmed > Date.now()) { menuArmed = 0; model.signOut(); return 'close'; }
+                            menuArmed = Date.now() + 5000;
+                            return null;
+                        } }
+                        : { label: 'Sign in', run: () => { show('home'); model.authStart(true); return 'close'; } },
+                    { label: 'Settings', primary: true, run: () => { ctx.sheet(listSheet(settings, null, { version: mgu.SPEC.version })); return null; } },
+                ],
+            }));
+        }
         ui.onClick('BTN_PLAY', () => model.toggle());
         ui.onClick('BTN_RW', () => model.skip(-10000));
         ui.onClick('BTN_FF', () => model.skip(10000));
         ui.onClick('BTN_LIST', () => show(mode === 'player' ? browse : 'player'));
         if (ctx.onTab) ctx.onTab((i) => { if (TABS[i]) show(TABS[i]); });
-        ui.onClick('BTN_FIND', () => ui.open('MAIN'));
+        ui.onClick('BTN_FIND', () => openSearch());
         // where the kit runs the screen: no bar at all (the rail and the player's overlay do its jobs), so the
         // pages reach the screen's bottom; the HMI's own screen keeps all five
         if (ctx.hideButton) ['BTN_PLAY', 'BTN_RW', 'BTN_FF', 'BTN_LIST', 'BTN_FIND'].forEach((b) => ctx.hideButton(b, true));
@@ -391,16 +433,20 @@ mgu.run({
         ];
         // while something plays: back to the player (the bar's Now playing, where the kit runs the screen)
         const PLAYING = ['player', 'Playing', (cv, x, y, c) => { [10, 20, 14].forEach((h, k) => cv.roundRect(x - 15 + k * 11, y + 8 - h, 8, h + 8, 2, c)); }];
+        // iDrive 8 (no HMI menu): the account and the settings (three sliders)
+        const MORE = ['more', 'Settings', (cv, x, y, c, bg) => {
+            [[-12, -6], [0, 9], [12, -2]].forEach(([dy, kx]) => { cv.roundRect(x - 18, y + dy - 2, 36, 4, 2, c); cv.circle(x + kx, y + dy, 6, c); cv.circle(x + kx, y + dy, 2.5, bg); });
+        }];
         function drawRail(cv) {
             const sel = mode === 'results' ? 'search' : mode === 'channel' ? 'subs' : mode, bottom = H + (cv.own ? cv.extra : 0);
-            const items = cv.own && model.active() ? RAIL.concat([PLAYING]) : RAIL;
+            const items = (cv.own && model.active() ? RAIL.concat([PLAYING]) : RAIL).concat(ID8 ? [MORE] : []);
             const pitch = Math.min(100, (bottom - 156) / (items.length - 1));   // (the page down to the screen's bottom where it reaches)
             items.forEach(([m, name, glyph], i) => {
                 const cx = 62, cy = 96 + Math.round(i * pitch), on = m === sel, bg = on ? '#2c2c2c' : C.bg, c = on ? '#ffffff' : C.dim;
                 if (on) { cv.roundRect(18, cy - 38, 90, 84, 16, bg); cv.roundRect(18, cy - 14, 5, 28, 2.5, C.red); }
                 glyph(cv, cx, cy - 8, c, bg);
                 cv.text(name === 'Subscriptions' ? 'Subs' : name, cx, cy + 34, 18, c, { literal: true, align: 'center', font: on ? 'bold' : 'label' });
-                if (cv.own) cv.target(16, cy - 38, 92, 84, () => (m === 'search' ? ui.open('MAIN') : show(m)), 'rail:' + m, 16);
+                if (cv.own) cv.target(16, cy - 38, 92, 84, () => (m === 'search' ? openSearch() : m === 'more' ? openMenu() : show(m)), 'rail:' + m, 16);
             });
         }
 
@@ -467,6 +513,11 @@ mgu.run({
         // the channels, filtered by chanQ (the keyboard: one letter = names starting with it, else names holding it)
         let chanQ = '';
         function findChannel() {
+            if (ID8) {
+                ctx.sheet(keyboardSheet({ title: 'Find a channel', hint: 'A name, or its first letter', action: 'Find', locked: typingLocked,
+                    onDone: (t) => { chanQ = String(t).trim(); vs('subs').sy = 0; vs('subs').off = {}; dirty = true; show('subs'); } }));
+                return;
+            }
             spell(ctx.app, 'Find a channel').then((t) => {
                 if (t === null || t === undefined) { ui.open('VIEW'); return; }
                 chanQ = String(t).trim(); vs('subs').sy = 0; vs('subs').off = {}; dirty = true;
@@ -919,6 +970,7 @@ mgu.run({
         // the HMI's home and back arrow column: its taps stay the HMI's, but no black hole over the video;
         // the same two icons where the HMI has them (screen px), on the scrim
         function hmiIcons(cv) {
+            if (ID8) return;               // (iDrive 8: the surface is under the HMI's strip; no column of its there)
             cv.xf(1, 0, 0);
             cv.circle(44, 42, 30, '#00000099');
             RAIL[1][2](cv, 44, 44, '#ffffff', '#1a1a1a');

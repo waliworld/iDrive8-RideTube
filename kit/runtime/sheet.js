@@ -4,7 +4,7 @@
  * layout, mgu-render/1): the settings and cards such as the Service app's item details.
  *
  * A sheet is driven by the display (display.js openSheet):
- *   draw(r, t)  draw on r (a 1600 x 520 Recorder, the app's page coordinates); returns the touch
+ *   draw(r, t)  draw on r (a 1600 x 520 Recorder - iDrive 8: 2080 wide -, the app's page coordinates); returns the touch
  *               targets [{ x, y, w, h, act }] (act(): what a tap does; 'close' closes the sheet)
  *   move(d)     controller knob: d clicks (+ = clockwise)
  *   press()     controller press; back(): tilt left. Both return 'close' to close the sheet.
@@ -19,7 +19,7 @@ const { withAlpha } = require('./canvas');
 const G = require('./gauges');
 const { t: translate } = require('./i18n');
 
-const W = 1600, TOP = 46, BOTTOM = 512;
+const PAGE_W = 1600, TOP = 46, BOTTOM = 512;     // (the page's width is the recorder's: r.w)
 const ROW_H = 66, GAP = 8;
 
 /* ---------------- drawing helpers ---------------- */
@@ -52,7 +52,7 @@ function fit(r, s, size, w, font) {
  */
 function list(r, t, key, rows, focus, y0, controller) {
     // (r.extra: the page reaches lower on screen, display.js)
-    const S = t.sel || t.accent, bottom = BOTTOM + (r.extra || 0), H = bottom - y0;
+    const W = r.w || PAGE_W, S = t.sel || t.accent, bottom = BOTTOM + (r.extra || 0), H = bottom - y0;
     const total = rows.length * (ROW_H + GAP) - GAP;
     const fy = focus * (ROW_H + GAP);
     // st.y: where the list should be; st.show: where it is drawn (glides there, follows a finger at once).
@@ -122,7 +122,7 @@ function listSheet(settings, title, opts) {
         },
         draw(r, t) {
             r.clear(t.bg);
-            const rows = this.rows();
+            const W = r.w || PAGE_W, rows = this.rows();
             // the header's tab names the sheet; a value list names its setting here
             if (this.open) r.text(this.open.label, 44, TOP + 40, 32, t.text, { font: 'bold' });
             else if (version) r.text('Version ' + version, 44, TOP + 38, 24, t.dim);
@@ -193,7 +193,7 @@ function cardSheet(spec) {
         focus: 0, controller: false, onClose: null,
         draw(r, t) {
             r.clear(t.bg);
-            const targets = [];
+            const W = r.w || PAGE_W, targets = [];
             const actions = get('actions') || [];
             this.focus = Math.max(-1, Math.min(this.focus, actions.length - 1));
             const x = 40, y = TOP + 6, w = W - 80, h = BOTTOM + (r.extra || 0) - y - 4;
