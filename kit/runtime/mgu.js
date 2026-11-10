@@ -37,8 +37,10 @@ const SPEC = JSON.parse(fs.readFileSync(path.join(__dirname, 'app-spec.json'), '
 const ID8 = SPEC.hmi === 'ID8';
 // iDrive 8: the app's entry module (kit/id8/boot.js, the one module the head unit links against its oap-sdk) starts the
 // SDK, registers the tile, opens the page and answers the app manager; the kit gets its OnlineApp and its events here
-// and does none of that itself.
-const HOST = ID8 ? global.__mguHost || null : null;
+// (through kit/sdk.js) and does none of that itself. The entry module runs in the head unit's own way of loading a
+// bundle: its objects may come from another JavaScript context than this file's, so nothing here tells what they
+// are with instanceof.
+const HOST = ID8 ? require('./sdk').host || null : null;
 
 /* ---------------- paths ---------------- */
 // cwd of an OAP app is oap_<uid>/data; source is oap_<uid>/source
@@ -580,7 +582,8 @@ function watchId8(ui, tracked, mainName) {
     });
     ui.rhmi.on('applicationStackChanged', (stack) => {
         try {
-            const isMap = stack instanceof Map;
+            // (a Map by what it can do: one from the SDK's context is no instance of this file's Map)
+            const isMap = !!stack && typeof stack === 'object' && typeof stack.keys === 'function' && typeof stack.entries === 'function' && typeof stack.get === 'function';
             const keys = isMap ? Array.from(stack.keys()) : stack && typeof stack === 'object' ? Object.keys(stack) : [];
             let said = '';
             try { said = JSON.stringify(isMap ? Array.from(stack.entries()) : stack).slice(0, 300); } catch (e) { said = String(stack); }

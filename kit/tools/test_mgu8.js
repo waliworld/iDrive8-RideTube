@@ -13,6 +13,8 @@
 //     start for no screen, a refused open, a refused entry point init - and whatever becomes of the app's own code;
 //   - the screen: the renderer is asked to show the app whatever form the HMI's stack, visible and focus events take,
 //     and to hide it when the page goes;
+//   - the renderer: connected as the apps known to draw on an iDrive 8 car connect (IterioDev's dialect), touch
+//     areas claimed; mgu-render/1 on request;
 //   - when the picture cannot come, the page's title and its status lines say why.
 //   MGU_STORE=<clone> node kit/tools/test_mgu8.js
 const assert = require('assert');
@@ -43,15 +45,19 @@ const version = L.manifest.version;
     const pkg = JSON.parse(built('package.json'));
     assert.deepStrictEqual([pkg.main, pkg.mguLocalOnly, pkg.mguHmi], ['javascript/runner.js', true, ['ID8']], 'package.json: ' + JSON.stringify(pkg));
     assert.ok(/^\/\* app modules[\s\S]*?\*\/\s*\(function\(\)\{function r\(e,n,t\)/.test(built('javascript/app.js')), 'javascript/app.js is the linked bundle');
-    assert.ok(built('javascript/app.js').indexOf('__mguHost') > 0, 'with the kit\'s entry module in it');
+    assert.ok(built('javascript/app.js').indexOf("'kit', 'sdk.js')).give(") > 0, 'with the kit\'s entry module in it');
+    assert.ok(!/global\.__mgu(Sdk|Host)/.test(built('javascript/app.js')) && !/global\.__mgu(Sdk|Host)/.test(built('app/kit/sdk.js') + built('app/kit/mgu.js')), 'the SDK is not handed over through a global (the bundle\'s is its own on the car)');
     assert.strictEqual(L.link.needsSdk(L.dir), false, 'no file of the built package asks for an SDK module by name');
     assert.strictEqual(L.link.needsCertification(L.dir), false, 'its manifest names the certification service');
     assert.strictEqual(L.build.certification, null, '(nothing had to be added)');
     console.log('ok   the package: built by the Store\'s linker (' + L.build.moduleCount + ' modules, main from ' + L.build.entry + '), no SDK asked for by name');
 }
 
-const run = (scenario, sdk) => {
-    const out = cp.execFileSync(process.execPath, [path.join(__dirname, 'mgu8_harness.js'), L.dir, scenario].concat(sdk ? [sdk] : []), { encoding: 'utf8', timeout: 40000, stdio: ['ignore', 'pipe', 'ignore'] });
+// env: MGU8_CONTEXT=shared (the stock entry point loads the bundle by a plain require; default: in a JavaScript context
+// of its own, as a car showed), MGU_RENDERD_PROTO=native (mgu-render/1; default on iDrive 8: IterioDev's dialect)
+const run = (scenario, sdk, env) => {
+    const out = cp.execFileSync(process.execPath, [path.join(__dirname, 'mgu8_harness.js'), L.dir, scenario].concat(sdk ? [sdk] : []),
+        { encoding: 'utf8', timeout: 40000, stdio: ['ignore', 'pipe', 'ignore'], env: Object.assign({}, process.env, { MGU8_CONTEXT: '', MGU_RENDERD_PROTO: '' }, env || {}) });
     return JSON.parse(out.trim().split('\n').pop());
 };
 const last = (a) => a[a.length - 1];
@@ -69,8 +75,15 @@ function sane(r, what, o) {
     assert.deepStrictEqual([r.tile.text, r.tile.icon], [0, 0], what + ': the tile keeps the manager\'s name and icon' + tell(r));
     if (!o.noApp) assert.ok(r.proxies.some((p) => p[0] === 'de.bmw.infotainment.vehicle.Vehicle2' && p[1] === '1' && p[2] === 'number'), what + ': speed through the SDK\'s proxy: ' + JSON.stringify(r.proxies));
 }
-function shown(r, what) {
-    assert.ok(/proto=mgu-render\/1/.test(r.hello), what + ': mgu-render/1 asked for');
+function shown(r, what, o) {
+    if (o && o.native) assert.ok(/proto=mgu-render\/1/.test(r.hello) && r.x >= 1, what + ': mgu-render/1 asked for, its mode set');
+    else {
+        // IterioDev's dialect, as the apps known to draw on an iDrive 8 car connect: the app id alone, the dialect
+        // told by an empty CLAIM first, then the touch areas; nothing of mgu-render/1, no upstream GRAB
+        assert.strictEqual(r.hello, 'jap_ridetube8', what + ': HELLO is the app id alone: ' + JSON.stringify(r.hello));
+        assert.deepStrictEqual([r.first911, r.x, r.grab10], [[9, 4], 0, 0], what + ': an empty CLAIM first, no mgu-render/1 message, no GRAB: ' + JSON.stringify([r.first911, r.x, r.grab10]));
+        assert.ok(r.claims.some((n) => n > 0), what + ': touch areas claimed: ' + JSON.stringify(r.claims));
+    }
     assert.deepStrictEqual(r.place, { x: 0, y: 76, w: 2880, h: 764, scale: 1.4 }, what + ': the app area');
     assert.strictEqual(last(r.shows), 1, what + ': shown (SHOW ' + JSON.stringify(r.shows) + ')' + tell(r));
     assert.ok(r.frames >= 2, what + ': frames sent: ' + r.frames);
@@ -147,16 +160,30 @@ for (const k of ['event', 'hang', 'late-rhmi', 'member', 'no-last', 'refuse-open
     console.log('ok   no renderer: "' + last(r.titles) + '"\n       ' + ['VIEW_INFO1', 'VIEW_INFO2', 'VIEW_INFO3', 'VIEW_INFO4'].map((k) => r.info[k]).join('\n       '));
 }
 {
-    const r = run('not-in-front');
+    // mgu-render/1 (MGU_RENDERD_PROTO=native): the renderer says it does not have the app in front
+    const r = run('not-in-front', undefined, { MGU_RENDERD_PROTO: 'native' });
     sane(r, 'not in front');
     assert.ok(r.titles.some((t) => /^RideTube - the GPU renderer does not see this app in front/.test(t)), 'the title says why: ' + JSON.stringify(r.titles));
-    assert.ok(/in front no, on screen no/.test(r.info.VIEW_INFO3), 'line 3: ' + r.info.VIEW_INFO3);
-    console.log('ok   not in front: "' + last(r.titles) + '"');
+    assert.ok(/mgu-render\/1, gate yes, touch yes .* in front no, on screen no/.test(r.info.VIEW_INFO3), 'line 3: ' + r.info.VIEW_INFO3);
+    console.log('ok   mgu-render/1, not in front: "' + last(r.titles) + '"');
+}
+{
+    const r = run('visible-first', undefined, { MGU_RENDERD_PROTO: 'native' });
+    sane(r, 'mgu-render/1'); shown(r, 'mgu-render/1', { native: true });
+    console.log('ok   mgu-render/1: opened, shown, ' + r.frames + ' frames');
+}
+{
+    // the stock entry point loading the bundle by a plain require (one context, one global)
+    for (const k of ['plain', 'background']) {
+        const r = run('visible-first', k, { MGU8_CONTEXT: 'shared' });
+        sane(r, 'shared context, sdk ' + k); shown(r, 'shared context, sdk ' + k);
+    }
+    console.log('ok   the bundle loaded by a plain require: opened and shown');
 }
 {
     const r = run('id7-like');
     assert.ok(/^Screen: drawn by the GPU renderer/.test(r.info.VIEW_INFO2), 'line 2 when drawn: ' + r.info.VIEW_INFO2);
-    assert.ok(/^Renderer: connected .* \| mgu-render\/1, touch yes, gate yes \| screen 2880x960, area 0,76,2880,764 \| in front yes, on screen yes, asked yes \| frames yes, ticks yes/.test(r.info.VIEW_INFO3), 'line 3 when drawn: ' + r.info.VIEW_INFO3);
+    assert.ok(/^Renderer: connected .* \| IterioDev dialect, touch yes \| screen 2880x960 \| asked yes, claims yes \| frames yes, ticks yes/.test(r.info.VIEW_INFO3), 'line 3 when drawn: ' + r.info.VIEW_INFO3);
     assert.deepStrictEqual(r.titles.filter((t) => / - /.test(t)), [], 'no reason in the title while it draws');
     console.log('ok   drawn: ' + r.info.VIEW_INFO3.replace(/\/tmp\/\S+/, '<socket>'));
 }

@@ -16,6 +16,14 @@
  * the app on screen. A renderer that does not speak it answers READY alone and the connection
  * stays in the upstream dialect. Pixel images (op 18) are upstream only: an app that draws them
  * (Doom) connects without opts.native.
+ *
+ * opts.iterio: connect as IterioDev's kit does (the "iterio" dialect of mgu-render's PROTOCOL.md): HELLO is the
+ * app id alone, and messages 9 to 14, 105, 106 and ops 18 and 19 have the meaning they also have in mgu-render/1
+ * (touch claims, pictures, videos) - what `rich` says of a connection of either kind. None of mgu-render/1's own
+ * messages are sent or expected: no mode (a legacy client is a layer), no controller grab, no X_STATE. This is
+ * the dialect the iDrive 8 apps known to draw on a car speak, and one the renderer's foreground gate cannot hide
+ * for want of an answer: "a gate that reads nothing leaves [legacy apps] as they would be without it", while an
+ * mgu-render/1 app shows only while the gate names it in front.
  */
 const net = require('net');
 const fs = require('fs');
@@ -68,12 +76,15 @@ class RenderClient extends EventEmitter {
         this.fd = null;              // file sink
         this.claimed = null;         // the claims sent on this connection (JSON), null: none yet
         this.native = false;         // this connection speaks mgu-render/1 (X_READY came)
+        this.iterio = false;         // this connection speaks IterioDev's dialect (opts.iterio, READY came alone)
         this.info = null;            // X_READY: { touch, controller, frontGate }
         this.onScreen = null;        // X_STATE: the renderer shows us (null: not told)
     }
 
     /** Socket exists (the renderer is installed and running)? */
     static available(path) { return path ? isSocket(path) : SOCKETS.some(isSocket); }
+    /** IterioDev's message numbers hold on this connection: touch claims, pictures and videos (mgu-render/1 or opts.iterio) */
+    get rich() { return this.native || this.iterio; }
 
     connect() {
         if (this.opts.file) {
@@ -96,7 +107,7 @@ class RenderClient extends EventEmitter {
             this._reset();
             this.inbuf = Buffer.alloc(0);   // (a message cut off with the last connection)
             s.setNoDelay && s.setNoDelay(true);
-            this.native = false; this.info = null; this.onScreen = null;
+            this.native = false; this.iterio = false; this.info = null; this.onScreen = null;
             this.claimed = null;
             this._write(msg(M.HELLO, this._hello()));
             // upstream renderers take these before READY; they are sent again once READY came
@@ -112,7 +123,7 @@ class RenderClient extends EventEmitter {
         });
         s.on('close', () => {
             const was = this.ready;
-            this.connected = this.ready = this.native = false; this.sock = null; this.waiting = false; this.onScreen = null; this.front = null;
+            this.connected = this.ready = this.native = this.iterio = false; this.sock = null; this.waiting = false; this.onScreen = null; this.front = null;
             if (was) { this.log.warn('renderd: connection closed'); this.emit('close'); }
             if (!this.closed) this.retry = setTimeout(() => { this.retry = null; this.connect(); }, 3000);
         });
@@ -132,6 +143,7 @@ class RenderClient extends EventEmitter {
         if (this.connected) this._sendGrab(on ? 1 : 0);
     }
     _sendGrab(on) {
+        if (this.opts.iterio) return;      // (message 10 is a picture in that dialect; the HMI keeps the controller)
         if (this.native) this._write(this._u32msg(X.GRAB, [on]));
         // mgu-render/1 asked for: wait for READY, which tells the dialect (upstream GRAB is IMAGE there)
         else if (!this.opts.native || this.ready) this._write(this._u32msg(M.GRAB, [on]));
@@ -149,7 +161,7 @@ class RenderClient extends EventEmitter {
      * (not so in mgu-render/1: there claims and the grab go together).
      */
     claim(rects) {
-        if (!this.ready || !this.touch || (!this.native && (this.grabbing || this.sent.image.size))) return;
+        if (!this.ready || !this.touch || (!this.rich && (this.grabbing || this.sent.image.size))) return;
         const key = JSON.stringify(rects);
         if (key === this.claimed || (this.claimed === null && !rects.length)) return;
         const b = Buffer.alloc(4 + rects.length * 16);
@@ -189,10 +201,16 @@ class RenderClient extends EventEmitter {
                 this.ready = true; this.errLogged = false;
                 this.screen = { w: p.readUInt32LE(4), h: p.readUInt32LE(8) };
                 this.touch = p.length >= 16 && p.readUInt32LE(12) !== 0;
-                this.log.info('renderd: connected, screen ' + this.screen.w + 'x' + this.screen.h +
-                    (this.native ? ', mgu-render/1 ' + JSON.stringify(this.info) : this.opts.native ? ', upstream dialect (no mgu-render/1)' : ''));
+                this.iterio = !this.native && !!this.opts.iterio;
+                this.log.info('renderd: connected, screen ' + this.screen.w + 'x' + this.screen.h + (this.touch ? ', touch' : ', no touch routing') +
+                    (this.native ? ', mgu-render/1 ' + JSON.stringify(this.info) : this.iterio ? ', IterioDev\'s dialect' : this.opts.native ? ', upstream dialect (no mgu-render/1)' : ''));
                 if (this.native) this._write(this._u32msg(X.MODE, [X_MODE_LAYER]));
-                else if (this.grabbing && this.opts.native) this._write(this._u32msg(M.GRAB, [1]));
+                else if (this.iterio) {
+                    // no claim yet, said first: the renderer reads a legacy connection's dialect from its first
+                    // message 9, 10 or 11, and an empty CLAIM can only be IterioDev's (PROTOCOL.md "Telling them apart")
+                    this._write(msg(CLAIM, Buffer.alloc(4)));
+                    this.claimed = '[]';
+                } else if (this.grabbing && this.opts.native) this._write(this._u32msg(M.GRAB, [1]));
                 this.emit('ready', this.screen);
                 // after the app's placement (sent in 'ready'): SHOW again. A SHOW sent before the renderer
                 // knew where the app goes (or before X_MODE) left the first app opened after start blank.
@@ -214,12 +232,12 @@ class RenderClient extends EventEmitter {
                 this.waiting = false;
                 this.ticks = (this.ticks || 0) + 1;
                 this.emit('tick', p.readUInt32LE(0), p.readUInt32LE(4));
-            } else if ((this.claimed || this.native) && type === TOUCH && p.length >= 12) {
+            } else if ((this.claimed || this.rich) && type === TOUCH && p.length >= 12) {
                 this.emit('touch', p.readUInt32LE(0), p.readFloatLE(4), p.readFloatLE(8));
-            } else if ((this.claimed || this.native) && type === CLOSED) {
+            } else if ((this.claimed || this.rich) && type === CLOSED) {
                 this.visible = false;
                 this.emit('closed');
-            } else if (!this.native && type === E.CCU && p.length >= 5) {
+            } else if (!this.rich && type === E.CCU && p.length >= 5) {
                 // the controller event the HMI didn't get (we hold the grab): FrontCCU names
                 this.emit('ccu', {
                     frontSequenceNumberOperatingElement: p[0], frontRotaryEncoderOperation: p.readUInt16BE(1),
@@ -295,8 +313,9 @@ class RenderClient extends EventEmitter {
         const head = Buffer.alloc(12);
         head.writeUInt32LE(id, 0); head.writeUInt32LE(im.w, 4); head.writeUInt32LE(im.h, 8);
         const px = Buffer.from(im.data.buffer, im.data.byteOffset, im.w * im.h * 4);
-        // mgu-render/1: a picture (drawn with Recorder.picture, op 18 there being `x y w h r id`), alpha premultiplied
-        this._write(msg(this.native ? PICTURE : M.IMAGE, Buffer.concat([head, px])));
+        // mgu-render/1 and IterioDev's dialect: a picture (drawn with Recorder.picture, op 18 there being
+        // `x y w h r id`), alpha premultiplied
+        this._write(msg(this.rich ? PICTURE : M.IMAGE, Buffer.concat([head, px])));
         this.sent.image.set(id, im.ver);
     }
     _ensureLayer(id) {
@@ -314,11 +333,12 @@ class RenderClient extends EventEmitter {
     }
 
     /**
-     * mgu-render/1: frames another program writes to `path` (/dev/shm/mgu-video-<name>), drawn with
-     * Recorder.video(id, ...). Sent once per connection and size (a resize drops videos); call again each frame.
+     * mgu-render/1 and IterioDev's dialect: frames another program writes to `path` (/dev/shm/mgu-video-<name>),
+     * drawn with Recorder.video(id, ...). Sent once per connection and size (a resize drops videos); call again
+     * each frame.
      */
     video(id, path) {
-        if (!this.ready || !this.native || this.sent.video.get(id) === path) return;
+        if (!this.ready || !this.rich || this.sent.video.get(id) === path) return;
         const p = Buffer.alloc(4 + Buffer.byteLength(path) + 1);
         p.writeUInt32LE(id, 0); p.write(path, 4);
         this._write(msg(VIDEO, p));

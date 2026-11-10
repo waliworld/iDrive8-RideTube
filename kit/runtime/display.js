@@ -202,9 +202,11 @@ class Display {
                 ' | page: visible ' + b(h.visible) + ', focus ' + b(h.focus) + ', stack ' + (h.stack || '-') + (h.fallback ? ' (no visible events)' : '') + ', shown ' + b(vis));
             ui.info(n + '_INFO3', 'Renderer: ' + (!g ? 'no socket - is the GPU renderer (mgu-render) installed and running?'
                 : (g.ready ? 'connected' : 'not connected' + (g.lastErr ? ' (' + g.lastErr + ')' : '')) + ' ' + (g.path || '') + (!g.ready ? ''
-                    : ' | ' + (g.native ? 'mgu-render/1' : 'older dialect') + ', touch ' + b(g.touch) + ', gate ' + b(g.info && g.info.frontGate) +
+                    : ' | ' + (g.native ? 'mgu-render/1, gate ' + b(g.info && g.info.frontGate) : g.iterio ? 'IterioDev dialect' : 'upstream dialect') + ', touch ' + b(g.touch) +
                       ' | screen ' + g.screen.w + 'x' + g.screen.h + (a ? ', area ' + [a.x, a.y, a.w, a.h].join(',') : '') +
-                      ' | in front ' + b(g.front) + ', on screen ' + b(g.onScreen) + ', asked ' + b(g.visible) +
+                      // (mgu-render/1 says whether it has the app in front and on screen; the other dialects do not)
+                      ' | ' + (g.native ? 'in front ' + b(g.front) + ', on screen ' + b(g.onScreen) + ', ' : '') + 'asked ' + b(g.visible) +
+                      ', claims ' + (g.claimed && g.claimed !== '[]' ? 'yes' : 'no') +
                       ' | frames ' + b(g.frames > 0) + ', ticks ' + b(g.ticks > 0))));
             ui.info(n + '_INFO4', this.appStatus || 'App: started');
         }
@@ -241,7 +243,12 @@ class Display {
     _startGpu(file) {
         // mgu-render/1 for every app that draws no pixel images (Doom: "chrome": false)
         const native = this.screen.chrome !== false && process.env.MGU_RENDERD_PROTO !== 'upstream';
-        const gpu = this.gpu = new RenderClient(this.spec.id, this.log, Object.assign({ native }, file ? { file } : {}));
+        // iDrive 8: IterioDev's dialect, as the apps that are known to draw on an iDrive 8 car connect (renderd.js
+        // opts.iterio: all the kit needs there - layer, touch claims, pictures, videos - and not subject to the
+        // renderer's foreground gate reading the HMI, which no one has confirmed on an iDrive 8).
+        // MGU_RENDERD_PROTO=native: mgu-render/1 there too.
+        const dialect = ID8 && process.env.MGU_RENDERD_PROTO !== 'native' ? { iterio: true } : { native };
+        const gpu = this.gpu = new RenderClient(this.spec.id, this.log, Object.assign(dialect, file ? { file } : {}));
         gpu.on('ready', () => { if (this.gpu !== gpu) return; this._place(); this._syncVisible(); this._grab(); });
         gpu.on('tick', () => { if (this.gpu === gpu) { this.tickT = Date.now(); this.tickHandlers.forEach((fn) => fn()); } });
         gpu.on('close', () => { if (this.gpu === gpu) { clearTimeout(this.frontTimer); this.blocked = false; this._lost(); } });
@@ -287,11 +294,11 @@ class Display {
     }
 
     /** The kit runs the screen: mgu-render/1 with touch, full-screen layout. */
-    own() { return !!(this.gpu && this.gpu.ready && !this.blocked && this.gpu.native && this.gpu.touch && this.place && this.place.full); }
+    own() { return !!(this.gpu && this.gpu.ready && !this.blocked && this.gpu.rich && this.gpu.touch && this.place && this.place.full); }
     /** own() but for the placement, which depends on it (the bar's height): the renderer and layout allow it. */
     ownable() {
         const g = this.gpu;
-        return !!(g && g.ready && g.native && g.touch && this.layout() === 'full' && g.screen.w === HMI.screen.w && g.screen.h === HMI.screen.h);
+        return !!(g && g.ready && g.rich && g.touch && this.layout() === 'full' && g.screen.w === HMI.screen.w && g.screen.h === HMI.screen.h);
     }
     /** Settings is the header's last tab where the kit runs the screen (the app has a Settings button). */
     hasSettings() { return !!(this.screen && (this.screen.buttons || []).some((b) => b[0] === 'BTN_SETTINGS')); }

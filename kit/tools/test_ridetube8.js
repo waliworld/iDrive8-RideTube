@@ -64,9 +64,10 @@ async function main() {
     hu.start();
     await until(() => d.cmds('auth_status').length, 3000, 'app connects');
 
-    // the renderer of an iDrive 8: 2880 x 960, touch routed (mgu-render/1)
+    // the renderer of an iDrive 8: 2880 x 960, touch routed, IterioDev's dialect (the kit's on iDrive 8)
     disp.gpu.screen = { w: 2880, h: 960 };
     disp.gpu.touch = true;
+    disp.gpu.iterio = true;
     disp._place();
     await hu.ui.open('VIEW');
     await hu.loopFn();

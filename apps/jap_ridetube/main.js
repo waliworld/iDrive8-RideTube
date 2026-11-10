@@ -337,7 +337,7 @@ mgu.run({
 
         /* ---------- video gate: on screen and parked; else off (sound plays on) ---------- */
         let ino = null, videoShown = false;
-        const gpu = () => (ctx.display && ctx.display.gpu && ctx.display.gpu.native ? ctx.display.gpu : null);
+        const gpu = () => (ctx.display && ctx.display.gpu && ctx.display.gpu.rich ? ctx.display.gpu : null);
         function sync() {
             const shown = ui.isVisible('VIEW') && (!ui.hasFocus || ui.hasFocus('VIEW'));
             const want = mode === 'player' && shown && !noVideo();

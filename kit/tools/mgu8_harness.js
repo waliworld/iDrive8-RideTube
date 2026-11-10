@@ -30,13 +30,16 @@ if (sdk === 'kit-broken') fs.writeFileSync(path.join(source, 'app', 'main.js'), 
 // ---- the fake renderer
 const seen = {
     shows: [], frames: 0, place: null, hello: null, titles: [], info: {}, opens: 0, openTries: 0, initialized: 0, asked: [],
+    // the renderer's side: claims = rect counts of the CLAIMs, first911 = [type, length] of the first message 9-11 (what
+    // the renderer reads a legacy connection's dialect from), x = mgu-render/1 messages, grab10 = upstream GRABs
+    claims: [], first911: null, x: 0, grab10: 0,
     status: { active: 0, inactive: 0, hmiVisible: 0, hmiInvisible: 0 }, tile: { init: 0, enabled: 0, text: 0, icon: 0, mapped: 0 },
     exit: null, proxies: [],
 };
 const sock = path.join(tmp, 'render.sock');
 const u32 = (type, words) => { const b = Buffer.alloc(8 + words.length * 4); b.writeUInt32LE(type, 0); b.writeUInt32LE(words.length * 4, 4); words.forEach((w, i) => b.writeUInt32LE(w >>> 0, 8 + i * 4)); return b; };
-let conn = null, asked = 0, front = 1;
-const state = () => { if (conn) conn.write(u32(0x4d520102, [1, asked && front ? 1 : 0, front])); };       // X_STATE: mode, on screen, in front
+let conn = null, asked = 0, front = 1, native = false;
+const state = () => { if (conn && native) conn.write(u32(0x4d520102, [1, asked && front ? 1 : 0, front])); };       // X_STATE: mode, on screen, in front
 net.createServer((c) => {
     let buf = Buffer.alloc(0);
     conn = c;
@@ -48,11 +51,18 @@ net.createServer((c) => {
             if (buf.length < 8 + len) break;
             const p = buf.slice(8, 8 + len);
             buf = buf.slice(8 + len);
-            if (type === 1) {                                   // HELLO: mgu-render/1 asked for -> X_READY, READY
-                seen.hello = p.toString('latin1').replace(/\0/g, ' ');
+            if (type === 1) {                                   // HELLO: with mgu-render/1 asked for X_READY first; READY
+                seen.hello = p.toString('latin1').replace(/\0/g, ' ').trim();
+                native = /proto=mgu-render\/1/.test(seen.hello);
                 // version, modes (layer), caps (touch, front gate), embed box, app area, largest pixmap, refresh
-                c.write(u32(0x4d520101, [1, 1, 1 | 4, 0, 0, 0, 0, 0, 76, 2880, 764, 2048, 60000]));
+                if (native) c.write(u32(0x4d520101, [1, 1, 1 | 4, 0, 0, 0, 0, 0, 76, 2880, 764, 2048, 60000]));
                 c.write(u32(101, [4, 2880, 960, 1]));
+            } else if (type >= 9 && type <= 11) {
+                if (!seen.first911) seen.first911 = [type, len];
+                if (type === 9 && len >= 4) seen.claims.push(p.readUInt32LE(0));
+                if (type === 10 && len === 4) seen.grab10++;
+            } else if (type >= 0x4d520000) {
+                seen.x++;
             } else if (type === 2) {
                 seen.place = { x: p.readInt32LE(0), y: p.readInt32LE(4), w: p.readInt32LE(8), h: p.readInt32LE(12), scale: +p.readFloatLE(16).toFixed(3) };
             } else if (type === 3) {

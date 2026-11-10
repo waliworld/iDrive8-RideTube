@@ -202,11 +202,13 @@ function open(uuid, tries) {
 }
 
 /* The kit and the app's own code: plain files of the package, loaded with the SDK handed over. A failure is logged
- * and shown on the page; the tile and the page work without it. */
+ * and shown on the page; the tile and the page work without it.
+ * Handed over through the kit's own module (kit/sdk.js give), which Node's module cache keeps one of, and not through
+ * a global: on the car this bundle's "global" is not the one the package's files see (0.4.3 set the SDK there, and
+ * the kit, loaded a line later, did not find it). */
 function loadApp() {
-    global.__mguSdk = { OnlineApp, logging, someipBuilders };
-    global.__mguHost = api;
     try {
+        require(path.join(RUNTIME, 'kit', 'sdk.js')).give({ OnlineApp, logging, someipBuilders }, api);
         require(path.join(RUNTIME, 'main.js'));
         facts.kit = 'loaded';
         say('INFO', 'the app is loaded');

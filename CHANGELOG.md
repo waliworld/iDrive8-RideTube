@@ -1,5 +1,25 @@
 # Changelog
 
+## App 0.4.4: iDrive 8, the page opened but the app's code did not load
+
+First run past the tile on a car (0.4.3): the page opened and said "RideTube - did not load ... the kit was loaded
+without the app's entry module". The start, the tile and the page work there; the hand-over of the SDK did not.
+
+- The entry module gave the SDK to the kit through a global. On the car the linked bundle does not run with the
+  `global` the package's other files see (the head unit's entry point loads the bundle its own way), so the kit,
+  loaded one line later, found nothing. The SDK and the host now go through the kit's own module (`kit/sdk.js`
+  `give`), which Node's module cache keeps one of. The test's stand-in for the car's entry point now runs the bundle
+  in a JavaScript context of its own; the published 0.4.3 shows the car's exact message there.
+- Nothing in the kit tells what an object from the entry module is with `instanceof` any more (a `Map` from the
+  SDK's context is no instance of the kit's).
+- **The renderer is spoken to as the iDrive 8 apps known to draw on a car speak to it** (IterioDev's dialect of
+  mgu-render's protocol: the app id alone in HELLO, touch claims, pictures and videos by the same message numbers
+  mgu-render/1 uses, a layer). 0.4.0 to 0.4.3 asked for mgu-render/1, where an app shows only while the renderer's
+  foreground gate names it in front - a reading of the HMI nobody has confirmed on an iDrive 8, and one that
+  hides the app if it finds nothing; a legacy connection is left as it is in that case. `MGU_RENDERD_PROTO=native`
+  asks for mgu-render/1 on iDrive 8 again. iDrive 7 is unchanged.
+- The renderer's status line says the dialect and whether touch areas are claimed.
+
 ## App 0.4.3: iDrive 8, the tile greys out and nothing opens - the app had no SDK
 
 The cause of the report from the car (0.4.0 to 0.4.2): tapping RideTube's tile greys it out and nothing opens.

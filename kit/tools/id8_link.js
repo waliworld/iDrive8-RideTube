@@ -15,10 +15,26 @@ const path = require('path');
 // module names them; each stand-in exports the class / object itself or, with shape 'member', as its member of that
 // name (the two shapes the Store's linker knows)
 const NAMES = { 'oap-sdk/src/core/OnlineApp.js': 'OnlineApp', 'oap-sdk/src/logging/logging': 'logging', 'oap-sdk/src/someip/someipBuilders': 'someipBuilders' };
-// a stock entry point: it runs the bundle its runnerConfig.json names (the linker copies it as the app's main)
-const ENTRY = "'use strict';\n// (stand-in for a stock app's entry point)\nvar path = require('path');\n" +
-    "var config = JSON.parse(require('fs').readFileSync(path.join(__dirname, 'runnerConfig.json'), 'utf8'));\n" +
-    "require(path.join(__dirname, config.JS_RELATIVE_PATH));\n";
+// a stock entry point: it runs the bundle its runnerConfig.json names (the linker copies it as the app's main).
+// How the car's own entry point runs the bundle is not known; what a car showed (RideTube 0.4.3) is that the bundle's
+// "global" is not the one the package's other files see. So this one runs it the strictest way that fits: in a
+// JavaScript context of its own, with a global of its own (MGU8_CONTEXT=shared: by a plain require instead).
+const ENTRY = `'use strict';
+// (stand-in for a stock app's entry point)
+var fs = require('fs');
+var path = require('path');
+var config = JSON.parse(fs.readFileSync(path.join(__dirname, 'runnerConfig.json'), 'utf8'));
+var file = path.join(__dirname, config.JS_RELATIVE_PATH);
+if (process.env.MGU8_CONTEXT === 'shared') require(file);
+else {
+    var box = { require: require, module: { exports: {} }, __dirname: __dirname, __filename: file, console: console, process: process, Buffer: Buffer,
+        setTimeout: setTimeout, setInterval: setInterval, setImmediate: setImmediate, clearTimeout: clearTimeout, clearInterval: clearInterval, clearImmediate: clearImmediate,
+        __mguFakeSdk: global.__mguFakeSdk };
+    box.exports = box.module.exports;
+    box.global = box;
+    require('vm').runInNewContext(fs.readFileSync(file, 'utf8'), box, { filename: file });
+}
+`;
 
 function donor(storeDir, dir) {
     const sample = require(path.join(storeDir, 'tools', 'test', 'synthetic_donor.js')).bundle();

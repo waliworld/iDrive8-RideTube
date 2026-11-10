@@ -4,11 +4,11 @@ RideTube, the unofficial YouTube client for BMW head units, **ported to iDrive 8
 [JustAnotherPU/ridetube](https://github.com/JustAnotherPU/ridetube) (iDrive 7), GPL-3.0-or-later; the port adds an
 iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.0) and Node.js 22 marked for iDrive 8.
 
-> **Beta: not yet confirmed on an iDrive 8 car.** 0.4.0 to 0.4.2 did not start there: the tile greyed out when
-> tapped. The cause was the kind of package (below, "iDrive 8": on iDrive 8 the Store gives BMW's app SDK only to
-> source packages), fixed in 0.4.3 and checked with the Store's own linker and its simulated iDrive 8 head unit, not
-> yet on a car. The app's own screen code has never run on a car either. **If the page opens but stays grey,
-> photograph it**: the lines on it say why. Reports welcome in the issues.
+> **Beta: starts on an iDrive 8 car, not yet seen drawing there.** 0.4.0 to 0.4.2 did not start (the tile greyed
+> out: the wrong kind of package for iDrive 8, below). 0.4.3 started, enabled its tile and opened its page on a car,
+> and its own code did not load (it looked for the SDK on a global the car does not share). 0.4.4 fixes that; its
+> screen code has not drawn on a car yet. **If the page opens but stays grey, photograph it**: the lines on it say
+> why. Reports welcome in the issues.
 
 ## Install on an iDrive 8 car
 
@@ -112,7 +112,11 @@ car-tested iDrive 8 apps, **not yet run on an iDrive 8 car**. Reports welcome in
   Store's own app. (On iDrive 7 it also generates `node_modules/oap-sdk` for an ordinary package; on iDrive 8 such a
   package installs, shows its tile and never starts.) `build.py --hmi ID8` writes `dist/src/jap_ridetube8@<v>.tgz`:
   `mgu-app.json`, one linked module (`kit/id8/boot.js`: the start, the tile, the shutdown) and the package tree with
-  the kit and the app as plain files (`app/`).
+  the kit and the app as plain files (`app/`). The linked module gives them the SDK through `kit/sdk.js`, not a
+  global: on the car the bundle's `global` is its own.
+- **The renderer.** The kit connects to mgu-render as the iDrive 8 apps known to draw on a car do (IterioDev's
+  dialect: a layer over the app area, touch claims, pictures, videos), not with mgu-render/1, whose foreground gate
+  is unconfirmed on iDrive 8.
 - Touch only (no controller gate on iDrive 8). The header's back arrow closes RideTube (a sheet over the page first).
 - Search opens RideTube's own keyboard, with your recent searches as buttons. Typing works only while parked; the
   recent searches work while driving.
@@ -137,7 +141,7 @@ What may need a fix on the car, and how to tell (`journalctl -u jap-ridetube-d`,
 - **A grey page.** The HMI's own page under RideTube's screen has four status lines and says the reason in its
   title: the version, how the app was started, the tile, the page and whether the app's code loaded
   (`start: ... | tile: ... | page: ... | app: ...`), the screen (`visible`, `focus`, `stack`), the renderer
-  (`connected`, `in front`, `on screen`, `frames`) and the service. RideTube's screen covers them while it draws, so
+  (`connected`, the dialect, `touch`, `asked`, `claims`, `frames`, `ticks`) and the service. RideTube's screen covers them while it draws, so
   a page you can read them on is one the picture did not reach: a photo of it is the report. A page with only
   `Starting...` means the app's process did not run. The app's log has the first events the HMI sent
   (`hmi: visible ...`, `hmi: focus ...`, `hmi: stack ...`).
