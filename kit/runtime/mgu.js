@@ -682,13 +682,51 @@ async function runInner(impl) {
     // visibility of our states (pauses rendering when the user leaves); the HMI's settings screen too (the
     // drawn screen gives way to it: display.js)
     const tracked = (SPEC.screens || []).concat(SPEC.settings && SPEC.settings.length && !ID8 ? [{ name: 'SETTINGS' }] : []);
+    // iDrive 8: RHMI values come as booleans, or as 1 / 0 or strings (the MGU Store's isTrue, on both HMIs)
+    const yes = (v) => (ID8 ? v === true || v === 'true' || v === 1 || v === '1' : !!v);
+    let sawFront = false;            // (iDrive 8) one of our screens has been shown: a stack without the app is a leave
     tracked.forEach((s) => {
         const st = ui.comp(s.name);
-        if (st && st.on) st.on('visible', (ev) => { if (ev && ev.visible) ui._raise(s.name); ui._setVisible(s.name, !!(ev && ev.visible)); });
+        if (st && st.on) st.on('visible', (ev) => {
+            const on = yes(ev && ev.visible);
+            if (ID8) logOnce('visible ' + s.name + ' ' + JSON.stringify(ev && ev.visible));
+            if (on) { sawFront = true; ui._raise(s.name); }
+            ui._setVisible(s.name, on);
+        });
         // a popup over the screen (options, warnings, calls) takes its focus: the display hides
         // the GPU overlay meanwhile, so the popup is never covered
-        if (st && st.on) st.on('focus', (ev) => ui._setFocus(s.name, !(ev && ev.focus === false)));
+        if (st && st.on) st.on('focus', (ev) => ui._setFocus(s.name, ID8 ? !(ev && 'focus' in ev) || yes(ev.focus) : !(ev && ev.focus === false)));
     });
+    // (iDrive 8) the first few raw events in the app's log: what this HMI sends, for a report from the car
+    const seenLog = {};
+    function logOnce(line) { const k = line.replace(/[0-9]+/g, '#'); if ((seenLog[k] = (seenLog[k] || 0) + 1) <= 3) log.info('hmi: ' + line); }
+    /*
+     * iDrive 8: the stack decides only what its keys say for sure, as the MGU Store's app and IterioDev's iDrive 8
+     * apps read it: ROOT_APP there = the app is in front (a screen it lists, by id or name in any form, is shown);
+     * keys without ROOT_APP once a screen was shown = the user left the app (every screen hidden); no keys: nothing.
+     * Which screen shows is otherwise the screens' own visible events: iDrive 7's reading (the stack's ids against
+     * getId()) hid the page on iDrive 8, whose stack doesn't list it that way - the grey page of 0.4.0.
+     */
+    function stackId8(stack) {
+        const isMap = stack instanceof Map;
+        const keys = isMap ? Array.from(stack.keys()) : stack && typeof stack === 'object' ? Object.keys(stack) : [];
+        logOnce('stack ' + JSON.stringify(isMap ? Array.from(stack.entries()) : stack).slice(0, 300));
+        if (!keys.length) return;
+        const root = keys.indexOf('ROOT_APP') >= 0;
+        Promise.resolve().then(() => (root ? app.registerHmiVisible() : app.unregisterHmiVisible())).catch((e) => log.warn('hmi visible: ' + e));
+        if (!root) {
+            if (sawFront) tracked.forEach((s) => ui._setVisible(s.name, false));
+            return;
+        }
+        const list = [].concat(isMap ? stack.get('ROOT_APP') || [] : stack.ROOT_APP || []);
+        const names = list.map((x) => String(x && typeof x === 'object' ? (x.id !== undefined ? x.id : x.name !== undefined ? x.name : '') : x));
+        tracked.forEach((s) => {
+            const st = ui.comp(s.name);
+            const ids = [s.name, st && st.getId ? String(st.getId()) : null, SPEC.stateIds && SPEC.stateIds[s.name] != null ? String(SPEC.stateIds[s.name]) : null];
+            if (names.some((n) => ids.indexOf(n) >= 0)) { sawFront = true; ui._raise(s.name); ui._setVisible(s.name, true); }
+            if (st && ui.isVisible(s.name)) ui._setFocus(s.name, true);
+        });
+    }
     // the status for MainApp follows our screens' visibility, as the Store's does: behind Home the HMI
     // keeps ROOT_APP in the app's stack, only the screen's own visible event says it went. A screen that
     // gives way to another of ours (main to settings) is not a hide: none visible for 800 ms is.
@@ -701,6 +739,7 @@ async function runInner(impl) {
     });
     app.on('changeVisibility', (d) => { if (d && d.visible === false) { clearTimeout(hideTimer); life.setShown(false); } });
     ui.rhmi.on('applicationStackChanged', (stack) => {
+        if (ID8) { stackId8(stack); return; }
         const shown = stack && Object.keys(stack).length > 0 && ('ROOT_APP' in stack);
         Promise.resolve().then(() => (shown ? app.registerHmiVisible() : app.unregisterHmiVisible()))
             .catch((e) => log.warn('hmi visible: ' + e));
@@ -763,7 +802,7 @@ async function runInner(impl) {
         opening = map
             .then(() => (mainState && mainState.updateResources ? mainState.updateResources().catch(() => {}) : null))
             .then(() => ui.rhmi.openEntryState(uuid))
-            .then(() => { ui._raise(mainName); ui._setVisible(mainName, true); })
+            .then(() => { sawFront = true; ui._raise(mainName); ui._setVisible(mainName, true); })
             .catch((e) => {
                 if ((tries || 1) > 1 && /INVALID/.test(String(e && e.message ? e.message : e) + ' ' + JSON.stringify(e || {}))) again = true;
                 else log.error('open entry state', e);

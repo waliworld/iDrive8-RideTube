@@ -1,5 +1,16 @@
 # Changelog
 
+## App 0.4.1: iDrive 8 grey page
+
+- iDrive 8: the page stayed grey (the HMI's empty page, RideTube's screen never drawn over it). The kit read the HMI's
+  screen stack as on iDrive 7 (the page's numeric id in a list) and took any stack that did not list it that way
+  for the page gone, so the renderer was told to hide RideTube right after it opened. On iDrive 8 the page's own
+  visible event (true, 1 or "true") decides, as in the MGU Store's app and IterioDev's iDrive 8 apps; the stack
+  only says the app is in front (ROOT_APP) or was left. The first HMI events go to the app's log.
+- iDrive 8: when the screen still can't be drawn (no renderer, another app in front...), the page's title says why
+  after 4 s instead of a silent grey page.
+- Tests: kit/tools/test_mgu8.js starts the built app against a fake iDrive 8 HMI and a fake mgu-render.
+
 ## App 0.4.0, service 0.4.0: iDrive 8
 
 - iDrive 8 (experimental, not yet run on a car): a second app, `jap_ridetube8` (`build.py --hmi ID8`), from the same

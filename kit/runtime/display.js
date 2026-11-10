@@ -144,6 +144,9 @@ class Display {
             if (k === 'renderer') this._mode();
         });
         this._mode();
+        // iDrive 8: the HMI shows only the app's empty page under the renderer's surface; should the surface not come
+        // (no renderer, another app in front...), the page's title says why instead of staying a silent grey page
+        if (ID8) { this.statusT = setInterval(() => this._id8Status(), 1000); if (this.statusT.unref) this.statusT.unref(); }
         // slim bar: light the button the controller is on (HMI focus events) and flash on press
         (this.screen.buttons || []).forEach((b) => {
             const c = ui.rhmi && ui.rhmi.getByName(b[0]);
@@ -166,6 +169,31 @@ class Display {
                 this._repaint();
             });
         });
+    }
+
+    /** iDrive 8: why the screen shows nothing but the HMI's page, or null when the renderer has it. */
+    _id8Why() {
+        const g = this.gpu;
+        if (!g) return 'needs the GPU renderer mgu-render (not running)';
+        if (!g.ready) return 'waiting for the GPU renderer (mgu-render)';
+        if (this.blocked) return 'the renderer shows another app (restart the head unit)';
+        if (!this.own()) return g.screen.w !== HMI.screen.w || g.screen.h !== HMI.screen.h
+            ? 'screen ' + g.screen.w + 'x' + g.screen.h + ' is not iDrive 8\'s 2880x960' : 'update mgu-render (touch)';
+        if (g.visible && g.onScreen === false) return 'the renderer hides it (restart the head unit)';
+        return null;
+    }
+    /** iDrive 8: the page's title (the HMI's own) says why the screen stays empty, once it has for 4 s. */
+    _id8Status() {
+        if (!this.screen || !this.ui.isVisible || !this.ui.isVisible(this.screen.name)) { this.whySince = 0; return; }
+        const why = this._id8Why(), now = Date.now();
+        if (why && !this.whySince) this.whySince = now;
+        if (!why) this.whySince = 0;
+        const show = why && now - this.whySince >= 4000 ? why : null;
+        if (show === (this.titleWhy || null)) return;
+        this.titleWhy = show;
+        const title = this.screen.title || this.spec.title || '';
+        if (show) this.log.warn('display: the screen stays empty: ' + show);
+        if (this.ui.text) Promise.resolve(this.ui.text(this.screen.name + '_TITLE', show ? title + ' - ' + show : title)).catch(() => {});
     }
 
     /** Start / stop the GPU path for the 'renderer' setting; wait for the socket if it isn't there yet. */

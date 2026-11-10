@@ -122,6 +122,9 @@ What may need a fix on the car, and how to tell (`journalctl -u jap-ridetube-d`,
   start whether the head unit has it. Without it the sound plays and the picture shows "video failed, audio only".
 - **The tile.** The app registers its tile as the MGU Store does on iDrive 8. If the tile does nothing, the app's
   log says `no entry point handed over by the manager`.
+- **An empty page.** If RideTube's screen can't be drawn, the page's title says why after a few seconds
+  (`RideTube - needs the GPU renderer mgu-render`, `... the renderer shows another app`, ...). The app's log has the
+  first events the HMI sent (`hmi: visible ...`, `hmi: stack ...`): send them along with a report.
 
 ## Settings
 
@@ -191,6 +194,7 @@ A release needs an `oap-sdk` folder extracted from a BMW app you own (`node kit/
 ```sh
 python3 kit/tools/build.py jap_ridetube && node kit/tools/test_ridetube.js
 python3 kit/tools/build.py --hmi ID8 jap_ridetube && node kit/tools/test_ridetube8.js   # SHOTS=<dir>: PNGs of each screen
+node kit/tools/test_mgu8.js       # the built iDrive 8 app against a fake HMI and a fake mgu-render
 export MGU_STORE=<a clone of the MGU Store>
 (cd native/jap-ridetube-d && ./build.sh)      # jap-node22 is built in github.com/JustAnotherPU/mgu-apps
 python3 tools/release.py      # dist/release/: upload every file to a GitHub release tagged "catalog"

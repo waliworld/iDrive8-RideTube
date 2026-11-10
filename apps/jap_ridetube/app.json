@@ -6,7 +6,7 @@
     "id": "jap_ridetube8",
     "description": "Video in the car, for iDrive 8: an unofficial client for YouTube. Your Home, Subscriptions and Watch later (signed in on the car), search with an on-screen keyboard, channels and chapters; the sound through the car's media player, the picture only while parked (a podcast view while driving). Touch only. Needs the jap-ridetube-d tool and the GPU renderer (mgu-render)."
   },
-  "version": "0.4.0",
+  "version": "0.4.1",
   "license": "GPL-3.0-or-later",
   "vendor": "custom",
   "loggingId": "OAA6",

@@ -50,6 +50,7 @@ cd "$root"
 python3 kit/tools/build.py --hmi ID8 jap_ridetube
 node kit/tools/test_runtime.js >/dev/null && node kit/tools/test_keyboard.js >/dev/null
 node kit/tools/test_ridetube8.js >/dev/null
+node kit/tools/test_mgu8.js >/dev/null
 (cd "$d" && node test/test_ytd.js >/dev/null && node test/test_thumb.js >/dev/null)
 
 SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$root" log -1 --format=%ct 2>/dev/null || echo 0)}
