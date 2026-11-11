@@ -1,5 +1,22 @@
 # Changelog
 
+## Service 0.4.3: iDrive 8, what plays for the apps there (diagnostics; the app stays 0.4.5)
+
+The Diagnostics pages of 0.4.2 from a car: the MediaPlayer's `OapGenericMedia` (service 0xb042, instance 0x28) is not
+offered, like every on-demand player (Dynamic*, Browser*, Alexa); only the connected devices' players answer. The
+app manager (MainApp-21) has no description of the MediaPlayer at all: of the audio it has CommandControl and a
+`DynamicMediaPlayer`. So on iDrive 8 a player is made on demand, through an interface nobody has documented. This
+release reads what is needed to use it; it calls nothing new.
+
+- *The dynamic media player*: its description (printed whole: methods, arguments, fields), its instances asked,
+  its fields read.
+- The code around it: the interface calls near `DynamicMediaPlayer` in the app manager's code, and pieces of the
+  code around `DynamicMediaPlayer`, `playFile`, `OapGenericMedia` (the app manager's code is read first).
+- *What runs the media*: the processes and systemd units of the media and the audio, the sound cards.
+- The audio manager's sources and sinks, read through a description made of the unit's catalog (MainApp's own lacks
+  the two lists); all of the MediaPlayer's instances are asked (0.4.2 stopped at 32); the catalog's audio
+  interfaces are listed in full. The page is shorter where it was long (instances counted, players summed up).
+
 ## Service 0.4.2: iDrive 8, "Service unavailable for call playFile()" (the app stays 0.4.5)
 
 On a car, service 0.4.1 got the audio manager up and its `connect` accepted; the play then stopped at

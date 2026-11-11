@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.4.2';
+const VERSION = '0.4.3';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -993,7 +993,7 @@ Audio.prototype.probePlayers = async function (waitMs) {
     const push = (c, inst) => {
         const ids = idsOf(c.cfg, inst);
         const k = ids.service !== null && ids.instance !== null ? ids.service + '|' + ids.instance : (c.app ? path.basename(c.file) : c.file) + '|' + inst;
-        if (seen[k] || list.length >= 32) return;
+        if (seen[k] || list.length >= 120) return;
         seen[k] = true;
         list.push({ file: c.file, cfg: c.cfg, inst: inst, ids: ids, px: null, available: null, error: null });
     };
@@ -1051,6 +1051,51 @@ Audio.prototype.findPlayer = async function (waitMs) {
     }
     return true;
 };
+/* iDrive 8's app manager has, of the players, only the description of a DynamicMediaPlayer (and none of the
+ * MediaPlayer): what it is, for the Diagnostics page - the description found (MainApp's folders, then the apps'),
+ * each of its instances (at most 8) given a proxy and asked, and its fields read from the first that answers
+ * (reads only, 6 s in all). Nothing is called on it. */
+Audio.prototype.dynamic = async function () {
+    if (!this.dyn) {
+        this.dyn = { file: null };
+        const dirs = (this.opts.srcGen ? [this.opts.srcGen] : this.opts.srcGens || SRC_GENS).concat(this.appDirs());
+        for (const dir of dirs) {
+            let names = [];
+            try { names = fs.readdirSync(dir); } catch (e) { continue; }
+            const n = names.filter((x) => /dynamicmediaplayer\w*\.json$/i.test(x)).sort()[0];
+            const cfg = n ? readJsonCapped(path.join(dir, n), MAX_IFACE_JSON) : null;
+            if (cfg && typeof cfg === 'object') { this.dyn = { file: path.join(dir, n), cfg: cfg }; break; }
+        }
+    }
+    const y = this.dyn, out = { file: y.file, insts: [], values: {}, service: null };
+    if (y.file) {
+        const names = [];
+        ['fields', 'attributes'].forEach((k) => {
+            const v = y.cfg[k];
+            if (v && typeof v === 'object') (Array.isArray(v) ? v.map((x) => String(x && typeof x === 'object' ? x.name : x)) : Object.keys(v)).forEach((x) => names.push(x));
+        });
+        const end = Date.now() + 6000;
+        let read = false;
+        out.service = idsOf(y.cfg, '').service;
+        for (const inst of (instancesOf(y.cfg) || []).slice(0, 8)) {
+            const x = { name: inst, id: idsOf(y.cfg, inst).instance, available: null, error: null };
+            out.insts.push(x);
+            let px = null;
+            try { px = await this.proxy('DynamicMediaPlayer', y.cfg, inst, y.file, 3000); } catch (e) { x.error = errText(e); }
+            if (px) x.available = await this.answers(px);
+            if (!px || !x.available || read) continue;
+            read = true;
+            for (const f of names.slice(0, 16)) {
+                if (Date.now() > end) { out.values[f] = '(not asked: out of time)'; continue; }
+                try {
+                    const v = await withTimeout(Promise.resolve().then(() => px.getValue(f, 1500)), 2000, f);
+                    out.values[f] = String(JSON.stringify(v)).slice(0, 300);
+                } catch (e) { out.values[f] = '(' + errText(e).slice(0, 70) + ')'; }
+            }
+        }
+    }
+    this.diag.dyn = out;
+};
 /* At the start: the player in use given playerWaitMs to answer; when it does not, one that does is looked for
  * (findPlayer). Never an error: a play says what is missing. */
 Audio.prototype.settlePlayer = async function () {
@@ -1061,6 +1106,7 @@ Audio.prototype.settlePlayer = async function () {
         while (!up && Date.now() < end) { await sleep(200); up = await this.answers(this.mp); }
         this.diag.mp.available = up;
         if (!up) this.diag.mp.available = await this.findPlayer(ms(this.opts.probeMs, 3000));
+        if (!this.diag.mp.available) await this.dynamic();
     } catch (e) { this.note('looking for the media player failed: ' + errText(e)); }
 };
 /* The whole start, which the daemon repeats until it succeeds (Daemon.start): the proxies, the audio manager
@@ -1093,11 +1139,33 @@ Audio.prototype.why = function () {
     const d = this.diag;
     return 'the car\'s audio is not ready - ' + (d.short || d.error || d.stage) + ' (Settings > Diagnostics)';
 };
+/* The proxy the audio manager's sources and sinks are read from: cc, or - where its description lacks those lists
+ * (iDrive 8's MainApp keeps a trimmed one) - one more proxy of the same instance, from the description the app
+ * manager's generator makes of the unit's catalog. Made once; cc when it cannot be. */
+Audio.prototype.listsFrom = async function (cc) {
+    const d = this.diag;
+    if (!d.cc || !d.cc.lacks || d.cc.lacks.indexOf('listOfMainSources') < 0) return cc;
+    if (this.ccLists === undefined) {
+        this.ccLists = null;
+        try {
+            const made = this.generate(CC_ID), has = made.cfg ? offered(made.cfg) : null;
+            if (!made.cfg) this.note('the audio manager\'s sources and sinks cannot be read: its description lacks them and none could be made (' + made.error + ')');
+            else if (has && has.indexOf('listOfMainSources') < 0) this.note('the audio manager\'s sources and sinks cannot be read: the description made of the catalog lacks them too');
+            else {
+                const insts = instancesOf(made.cfg);
+                this.ccLists = await this.proxy('CommandControl', made.cfg, insts && insts.length && insts.indexOf(d.cc.instance) < 0 ? insts[0] : d.cc.instance, made.from);
+            }
+        } catch (e) { this.note('the audio manager\'s sources and sinks cannot be read: ' + errText(e)); }
+    }
+    return this.ccLists || cc;
+};
 /* The audio manager's lists (each read given 4 s; null: it gave none), kept as text for the log and the Diagnostics page. */
 Audio.prototype.lists = async function (cc) {
     const d = this.diag;
+    const from = await this.listsFrom(cc);
     const list = async (attr) => {
-        try { const v = await withTimeout(Promise.resolve(cc.getValue(attr, 4000)), 4500, attr); return Array.isArray(v) ? v : null; } catch (e) { return null; }
+        const px = attr === 'listOfMainConnections' ? cc : from;
+        try { const v = await withTimeout(Promise.resolve().then(() => px.getValue(attr, 4000)), 4500, attr); return Array.isArray(v) ? v : null; } catch (e) { return null; }
     };
     const name = (x) => String(x && (x.name || x.sourceName || x.sinkName) || '');
     const idOf = (x, k) => (x && typeof x[k] === 'number' ? x[k] : null);
@@ -1157,6 +1225,7 @@ Audio.prototype.refresh = async function () {
     if (this.px.cc && d.cc) d.cc.available = await this.answers(this.px.cc);
     if (this.px.mp && d.mp) d.mp.available = await this.answers(this.px.mp);
     if (this.px.cc && d.cc && d.cc.available) await this.lists(this.px.cc);
+    if (this.dyn) { try { await this.dynamic(); } catch (e) { this.note('the DynamicMediaPlayer could not be asked: ' + errText(e)); } }
 };
 Audio.prototype.waitAvailable = async function () {
     const end = Date.now() + this.opts.availWaitMs;
@@ -1617,7 +1686,7 @@ function audioInventory(o, search) {
         if (!ids) { out.push('Interface catalog ' + c + ': there, but not readable as one'); return; }
         const like = ids.filter((n) => AUDIO_LIKE.test(n) && n !== CC_ID && n !== MP_ID).sort();
         out.push('Interface catalog ' + c + ': ' + ids.length + ' interfaces, CommandControl ' + (ids.indexOf(CC_ID) >= 0 ? 'yes' : 'NO') + ', MediaPlayer ' +
-            (ids.indexOf(MP_ID) >= 0 ? 'yes' : 'NO') + (like.length ? '; others of the audio: ' + cap(like.map(short), 14) : ''));
+            (ids.indexOf(MP_ID) >= 0 ? 'yes' : 'NO') + (like.length ? '; others of the audio: ' + cap(like.map(short), 60) : ''));
     });
     const gens = (o.generators || []).filter((g) => fs.existsSync(g));
     gens.forEach((g) => {
@@ -1696,6 +1765,48 @@ function someipPolicies(dirs, services) {
     });
     return out;
 }
+/* What runs the media and the audio on this head unit: the processes named like them (their uid and command, from
+ * /proc), the systemd units named like them (with their state where systemctl says it within 3 s), and the sound
+ * cards. Lines for the page. */
+async function carMedia(o) {
+    const out = [], proc = o.procRoot || '/proc';
+    const cap = (l, n) => l.slice(0, n).join(' | ') + (l.length > n ? ' | +' + (l.length - n) + ' more' : '');
+    let pids = null;
+    try { pids = fs.readdirSync(proc).filter((n) => /^\d+$/.test(n)); } catch (e) { /* said below */ }
+    const hits = [];
+    (pids || []).forEach((pid) => {
+        let cmd;
+        try { cmd = fs.readFileSync(path.join(proc, pid, 'cmdline'), 'utf8').replace(/\0+/g, ' ').trim(); } catch (e) { return; }
+        if (!cmd || !/media|player|entertain|audio|gst|oap-mainapp/i.test(cmd) || /jap-ridetube|ytd\.js|ytdec|ytfetch/.test(cmd)) return;
+        let uid = '?';
+        try { uid = fs.statSync(path.join(proc, pid)).uid; } catch (e) { /* unknown */ }
+        const line = uid + ': ' + cmd.slice(0, 150);
+        if (hits.indexOf(line) < 0) hits.push(line);
+    });
+    out.push('Processes of the media and the audio (uid: command): ' + (pids === null ? 'not readable' : hits.length ? cap(hits, 24) : 'none found'));
+    const units = [];
+    (o.unitDirs || ['/usr/lib/systemd/system', '/lib/systemd/system', '/etc/systemd/system']).forEach((d) => {
+        let names = [];
+        try { names = fs.readdirSync(d); } catch (e) { return; }
+        names.filter((n) => /media|player|entertain|audio/i.test(n) && /\.(service|socket)$/.test(n) && !/jap-ridetube/.test(n)).sort().forEach((n) => { if (units.indexOf(n) < 0) units.push(n); });
+    });
+    const shown = units.slice(0, 40);
+    let states = [];
+    if (shown.length) {
+        states = await new Promise((res) => {
+            try {
+                cp.execFile(o.systemctl || 'systemctl', ['is-active'].concat(shown), { timeout: 3000 }, (e, so) => res(String(so || '').split('\n').map((x) => x.trim()).filter(Boolean)));
+            } catch (e) { res([]); }
+        });
+    }
+    out.push('Units of the media and the audio: ' + (shown.length ? cap(shown.map((n, i) => n.replace(/\.service$/, '') + (states.length === shown.length ? ' (' + states[i] + ')' : '')), 40) +
+        (units.length > 40 ? ' | +' + (units.length - 40) + ' more' : '') : 'none found'));
+    const snd = o.asound || '/proc/asound';
+    const txt = (f) => { try { return fs.readFileSync(path.join(snd, f), 'utf8').replace(/\s+/g, ' ').trim().slice(0, 500); } catch (e) { return null; } };
+    const cards = txt('cards'), pcm = txt('pcm');
+    out.push('Sound cards: ' + (cards === null ? 'not readable' : cards || 'none') + (pcm ? ' | devices: ' + pcm : ''));
+    return out;
+}
 /* How the apps installed on this head unit play media: their code (the .js of every app home and of the app manager,
  * bounded in files, bytes and time, read one at a time with the loop free in between) searched for the player's
  * instance names, the interfaces of the players and the audio manager, calls that start a playback, and the SDK's
@@ -1709,7 +1820,7 @@ const CODE_FINDS = [
 ];
 Daemon.prototype.scanCode = async function () {
     if (this.code) return this.code;
-    const o = this.opts, c = this.code = { state: 'running', files: 0, bytes: 0, found: {}, error: null };
+    const o = this.opts, c = this.code = { state: 'running', files: 0, bytes: 0, found: {}, error: null, snips: [], keys: {}, kinds: {}, calls: {} };
     try {
         const list = [];
         let left = 40000;
@@ -1717,7 +1828,7 @@ Daemon.prototype.scanCode = async function () {
             let names;
             try { names = fs.readdirSync(dir); } catch (e) { return; }
             for (const n of names) {
-                if (--left <= 0 || list.length >= 400) return;
+                if (--left <= 0 || list.length >= 600) return;
                 const p = path.join(dir, n);
                 if (/\.js$/.test(n)) { list.push({ p: p, label: label }); continue; }
                 if (depth <= 0 || n[0] === '.' || /\.(json|node|so|png|jpg|svg|ttf|otf|tgz|gz|zip|map|css|html|txt|md|bin|dat|jsc)$/i.test(n)) continue;
@@ -1728,8 +1839,14 @@ Daemon.prototype.scanCode = async function () {
         };
         let homes = [];
         try { homes = fs.readdirSync(o.oapRoot).filter((n) => /^oap_\d+$/.test(n)).sort(); } catch (e) { /* none */ }
+        // the app manager's own code first (it is what plays for the apps on iDrive 8), then the apps
+        (o.mainapps || []).forEach((m) => walk(path.join(m.root, 'src'), 'the app manager', 4));
+        (o.mainapps || []).forEach((m) => {
+            let names = [];
+            try { names = fs.readdirSync(m.root); } catch (e) { return; }
+            names.filter((n) => /\.js$/.test(n)).forEach((n) => list.push({ p: path.join(m.root, n), label: 'the app manager' }));
+        });
         homes.forEach((h) => walk(path.join(o.oapRoot, h), h, 6));
-        (o.mainapps || []).forEach((m) => walk(path.join(m.root, 'src'), 'the app manager', 3));
         const end = Date.now() + 60000;
         for (const f of list) {
             if (this.closed || Date.now() > end || c.bytes > (300 << 20)) break;
@@ -1756,6 +1873,33 @@ Daemon.prototype.scanCode = async function () {
                     (seen[v] = seen[v] || {})[app] = true;
                 }
             });
+            // what the code does around the players: pieces of it as written (told apart by their middle, so the SDK
+            // every app carries is shown once), and the interface calls near the DynamicMediaPlayer
+            const grab = (kind, re, max, before, after) => {
+                re.lastIndex = 0;
+                let x, last = -1e9;
+                while ((x = re.exec(text)) && (c.kinds[kind] || 0) < max) {
+                    if (x.index - last < before + after) continue;
+                    const key = kind + '|' + text.slice(Math.max(0, x.index - 40), x.index + 80).replace(/\s+/g, ' ');
+                    if (c.keys[key]) continue;
+                    c.keys[key] = true;
+                    last = x.index;
+                    c.kinds[kind] = (c.kinds[kind] || 0) + 1;
+                    c.snips.push({ kind: kind, where: app, text: text.slice(Math.max(0, x.index - before), x.index + after).replace(/\s+/g, ' ') });
+                }
+            };
+            grab('DynamicMediaPlayer', /dynamicmediaplayer/gi, 4, 250, 450);
+            grab('playFile', /playFile\s*[(:=]/g, 2, 350, 400);
+            grab('OapGenericMedia', /OapGenericMedia["'`]/g, 2, 300, 350);
+            grab('GenericMediaPlayer', /GenericMediaPlayer["'`]/g, 1, 300, 350);
+            const dynRe = /dynamicmediaplayer/gi, callRe = /\b(callMethod|getValue|setValue|subscribe)\(\s*(?:\{\s*name\s*:\s*)?["'`](\w+)["'`]([^;]{0,90})/g;
+            let y, spans = 0;
+            while ((y = dynRe.exec(text)) && spans++ < 40) {
+                const part = text.slice(Math.max(0, y.index - 2500), y.index + 2500);
+                callRe.lastIndex = 0;
+                let z;
+                while ((z = callRe.exec(part)) && Object.keys(c.calls).length < 30) c.calls[z[1] + ' ' + z[2]] = z[3].replace(/\s+/g, ' ').slice(0, 90);
+            }
             await sleep(15);
         }
         c.state = 'done';
@@ -1780,6 +1924,9 @@ Daemon.prototype.codeLines = function () {
             return v + ' (' + apps.slice(0, 2).join(', ') + (apps.length > 2 ? ' +' + (apps.length - 2) : '') + ')';
         }).join(' | ') + (vals.length > 10 ? ' | +' + (vals.length - 10) + ' more' : '') : 'none found'));
     });
+    const calls = Object.keys(c.calls);
+    if (calls.length) out.push('Calls near the DynamicMediaPlayer in the code: ' + calls.map((k) => k + c.calls[k]).join(' || '));
+    c.snips.forEach((x) => out.push('[' + x.kind + ', in ' + x.where + '] ' + x.text));
     return out;
 };
 /* The page's lines: '# ' starts a section. The sound first (what stops a play), then the files, the picture, the log. */
@@ -1798,16 +1945,18 @@ Daemon.prototype.diagLines = async function () {
         const x = d[k[0]];
         if (!x) { out.push(k[1] + ': not looked for yet'); return; }
         out.push(k[1] + ': ' + (x.file ? 'description ' + x.file : 'NO description') +
-            (x.instances ? ' | instance ' + (x.instance || '-') + ' of [' + x.instances.join(', ') + ']' : x.file ? ' | instance ' + (x.instance || '-') + ' (the description lists none)' : '') +
+            (x.instances ? ' | instance ' + (x.instance || '-') + ' of ' + (x.instances.length > 12 ? x.instances.length + ' instances' : '[' + x.instances.join(', ') + ']') :
+                x.file ? ' | instance ' + (x.instance || '-') + ' (the description lists none)' : '') +
             (x.ids && (x.ids.service !== null || x.ids.instance !== null) ? ' | service ' + hex(x.ids.service) + ', instance ' + hex(x.ids.instance) : '') +
             (x.file ? ' | answers: ' + yn(x.available) : '') + (x.lacks && x.lacks.length ? ' | the description lacks: ' + x.lacks.join(', ') : '') +
             (x.error && x.error !== d.error ? ' | ' + x.error : '') + (x.generator ? ' | generator: ' + x.generator : ''));
     });
     if (d.players) {
-        // by description: which of its instances the car offers
-        const by = {};
-        d.players.forEach((x) => { (by[x.file] = by[x.file] || []).push(x.inst + (x.ids.instance !== null ? '=' + hex(x.ids.instance) : '') + ' ' + (x.error ? 'FAILED (' + x.error.slice(0, 60) + ')' : x.available ? 'yes' : 'NO')); });
-        Object.keys(by).forEach((f) => out.push('Players the car offers (' + (Object.keys(by).length > 1 ? f : 'of this description') + '): ' + by[f].join(' | ')));
+        // those that answer, and each of the OAP, dynamic, online and generic ones
+        const tag = (x) => x.inst + (x.ids.instance !== null ? '=' + hex(x.ids.instance) : '');
+        const special = d.players.filter((x) => /oap|dynamic|online|generic|browser|temp/i.test(x.inst));
+        out.push('Players the car offers: ' + d.players.length + ' asked | answering: ' + (d.players.filter((x) => x.available).map(tag).join(', ') || 'none') +
+            (special.length ? ' | of the OAP, dynamic and online ones: ' + special.map((x) => tag(x) + ' ' + (x.error ? 'FAILED' : x.available ? 'yes' : 'NO')).join(', ') : ''));
     } else out.push('Players the car offers: not asked (the one in use answered at the start)');
     const conf = a.conf();
     out.push('Route: source ' + a.src + ' (listed: ' + yn(a.srcListed) + ') to sink ' + a.sink + ' (listed: ' + yn(a.sinkListed) + ')' +
@@ -1823,12 +1972,31 @@ Daemon.prototype.diagLines = async function () {
     } else out.push('Last play: none since the service started');
     const ev = Object.keys(d.events);
     out.push('Player events: ' + (ev.length ? ev.map((k) => k + ' ' + js(d.events[k])).join(' | ') : 'none yet'));
+    const dyn = d.dyn;
+    if (dyn) {
+        out.push('# The dynamic media player');
+        if (!dyn.file) out.push('No description of a DynamicMediaPlayer on this head unit.');
+        else {
+            out.push('Description ' + dyn.file + ' | service ' + hex(dyn.service) + ' | instances: ' + (dyn.insts.length ? dyn.insts.map((x) => x.name + (x.id !== null ? '=' + hex(x.id) : '') + ' ' +
+                (x.error ? 'FAILED (' + x.error.slice(0, 60) + ')' : yn(x.available))).join(', ') : 'none listed'));
+            const vals = Object.keys(dyn.values);
+            out.push('Its fields now: ' + (vals.length ? vals.map((k) => k + ' = ' + dyn.values[k]).join(' | ') : 'none read'));
+            let text = '';
+            try { text = JSON.stringify(a.dyn.cfg).replace(/"/g, '').replace(/,/g, ', '); } catch (e) { text = 'not printable'; }
+            out.push('The description: ' + text.slice(0, 7000) + (text.length > 7000 ? ' ... (+' + (text.length - 7000) + ' more)' : ''));
+        }
+    }
     out.push('# Who may use them');
     let pol;
     try {
-        pol = someipPolicies(o.policyDirs || [], [{ name: 'CommandControl', id: d.cc && d.cc.ids ? d.cc.ids.service : null }, { name: 'MediaPlayer', id: d.mp && d.mp.ids ? d.mp.ids.service : null }]);
+        pol = someipPolicies(o.policyDirs || [], [{ name: 'CommandControl', id: d.cc && d.cc.ids ? d.cc.ids.service : null }, { name: 'MediaPlayer', id: d.mp && d.mp.ids ? d.mp.ids.service : null }]
+            .concat(dyn && dyn.file ? [{ name: 'DynamicMediaPlayer', id: dyn.service }] : []));
     } catch (e) { pol = ['SOME/IP security: could not be read: ' + errText(e)]; }
     pol.forEach((l) => out.push(l));
+    out.push('# What runs the media');
+    let run;
+    try { run = await carMedia(o); } catch (e) { run = ['could not be read: ' + errText(e)]; }
+    run.forEach((l) => out.push(l));
     out.push('# How the installed apps play media');
     // (read once, when the car does not offer the player: asked for here too, shown when done)
     if (!this.code && d.ready && d.mp && d.mp.available === false) this.scanCode().catch(() => {});
@@ -1841,7 +2009,7 @@ Daemon.prototype.diagLines = async function () {
     out.push('Video decoder: ' + (this.decoder || 'not checked') + ' | ytdec ' + (fs.existsSync(o.ytdec) ? 'there' : 'MISSING'));
     out.push('Internet uid: ' + (this.fetchUid === null ? 'none yet' : this.fetchUid) + ' | uplink lease: ' + (fs.existsSync(o.leaseFile) ? 'there' : 'not there'));
     out.push('# Log (the last lines)');
-    this.recent.slice(-14).forEach((l) => out.push(l));
+    this.recent.slice(-10).forEach((l) => out.push(l));
     return out;
 };
 Daemon.prototype.sendDiag = async function () {
@@ -2507,7 +2675,7 @@ Daemon.prototype.close = async function () {
     if (this.server) this.server.close();
 };
 
-module.exports = { VERSION: VERSION, audioInventory: audioInventory, someipPolicies: someipPolicies, qualityHeight: qualityHeight, channelTiles: channelTiles, Daemon: Daemon, Audio: Audio, Account: Account, feedItems: feedItems, isPlayable: isPlayable, feedShelves: feedShelves, ytRequest: ytRequest, uplinkLookup: uplinkLookup, pickFetchUid: pickFetchUid, fetchRequest: fetchRequest, listCache: listCache, pruneCache: pruneCache, isReady: isReady };
+module.exports = { VERSION: VERSION, carMedia: carMedia, audioInventory: audioInventory, someipPolicies: someipPolicies, qualityHeight: qualityHeight, channelTiles: channelTiles, Daemon: Daemon, Audio: Audio, Account: Account, feedItems: feedItems, isPlayable: isPlayable, feedShelves: feedShelves, ytRequest: ytRequest, uplinkLookup: uplinkLookup, pickFetchUid: pickFetchUid, fetchRequest: fetchRequest, listCache: listCache, pruneCache: pruneCache, isReady: isReady };
 
 // the uplink's DNS servers (its lease): the system resolver (127.0.0.1) answers no internet names. No
 // lease (uplink down or not installed): the system resolver, as before
