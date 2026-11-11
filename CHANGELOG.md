@@ -1,5 +1,28 @@
 # Changelog
 
+## Service 0.4.2: iDrive 8, "Service unavailable for call playFile()" (the app stays 0.4.5)
+
+On a car, service 0.4.1 got the audio manager up and its `connect` accepted; the play then stopped at
+`Service unavailable for call playFile() (the car's MediaPlayer "OapGenericMedia" is not available)`: this iDrive 8
+has a description of the MediaPlayer, and does not offer (or does not let this service see) the instance iDrive 7
+plays OAP media with.
+
+- **The players the car does offer are asked.** When the player in use does not answer at the start (3 s), every
+  instance of every description of the MediaPlayer on the unit (MainApp's, a numbered one, the apps' copies) is
+  given a proxy and asked. Used instead: the same instance under another description (a numbered interface), else
+  the only offered instance named like the generic OAP media player, with the audio source named like it. Nobody
+  else's player (USB, Bluetooth) is tried. `audio.json`'s instance is never replaced. A play looks again, and goes
+  back to the measured instance once the car offers it.
+- **A player started with its source.** At a play, a player that does not answer is given 4 s once the source is
+  connected, before `playFile`.
+- **The error says it**: "the car does not offer the media player "OapGenericMedia" on this head unit (Settings >
+  Diagnostics)".
+- **Diagnostics, for the next step if none is offered**: the players asked and which answer; each interface's SOME/IP
+  service and instance id; *Who may use them* - the unit's SOME/IP security policies (`/etc/vsomeip`: who may ask
+  for and who offers the audio manager and the player, and whether this service is named); *How the installed apps
+  play media* - the code of the installed apps and the app manager read once in the background (bounded) for the
+  player instances, interfaces, playback calls and SDK media modules they use.
+
 ## App 0.4.5, service 0.4.1: iDrive 8, "Error: audio service timed out"
 
 First run of the whole app on a car (0.4.4): it draws, touch, the keyboard, search and thumbnails work. A video

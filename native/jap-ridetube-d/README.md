@@ -22,6 +22,13 @@ run on the car; nothing is downloaded for keeps: the cache holds the last few vi
   that one. Sink 1024 not listed: the only sink, or the only one the unit's own connections use; among several
   nothing is picked. The start is tried every 5 s until it succeeds, each proxy given 8 s a try; a play meanwhile
   gets `error` with the reason, and `diag` has the rest.
+  0.4.2, for a head unit that does not offer `OapGenericMedia` (an iDrive 8 car: `Service unavailable for call
+  playFile()`): when the player does not answer at the start, every instance of every MediaPlayer description on
+  the unit is asked; the same instance under another description, else the only offered instance named like the
+  generic OAP media player (with the audio source named like it), is used. Other players (USB, Bluetooth) are never
+  played through. At a play a player that does not answer is given 4 s once its source is connected. `diag` then
+  also says who the unit's SOME/IP security (`/etc/vsomeip`) lets ask for and offer the two services, and what the
+  installed apps' code uses to play media.
 - video: `ytdec --dir cache/<id> --rect WxH [--fill] --log /var/opt/jap-ridetube-d/log/ytdec.log`, which
   writes `/dev/shm/mgu-video-ridetube` for mgu-render; paced by `clock <elapsed_ms> <mono_ms>` lines.
 - media: `/var/opt/jap-ridetube-d/cache/<id>/` {meta.json, thumb.rgba, audio.m4a, index.bin, video.h264, and

@@ -1545,11 +1545,194 @@ async function main() {
         a = mk(() => ({ callMethod: (m) => (m === 'connect' ? Promise.reject({ code: 7 }) : Promise.resolve({ EntError: 'OK' })) }));    // eslint-disable-line prefer-promise-reject-errors
         await a.start();
         await assert.rejects(a.playNow('/x/audio.m4a'), /^Error: audio connect failed: \{"code":7\}$/);
-        a = mk((cfg) => (cfg.name.indexOf('MediaPlayer') >= 0 ? { isAvailable: async () => false, callMethod: async () => { throw new Error('call timed out'); } } : {}));
+        a = mk((cfg) => (cfg.name.indexOf('MediaPlayer') >= 0 ? { isAvailable: async () => false, callMethod: async () => { throw new Error('Service unavailable for call playFile()'); } } : {}));
+        Object.assign(a.opts, { playerWaitMs: 60, probeMs: 60, playerAfterMs: 120, probeAgainMs: 20 });
         await a.start();
-        await assert.rejects(a.playNow('/x/audio.m4a'), /^Error: call timed out \(the car's MediaPlayer "OapGenericMedia" is not available\)$/);
+        assert.strictEqual(a.diag.mp.available, false);
+        await assert.rejects(a.playNow('/x/audio.m4a'), /^Error: the car does not offer the media player "OapGenericMedia" on this head unit \(Settings > Diagnostics\)$/);
         assert.strictEqual(a.diag.play.player, false);
+        assert.ok(a.diag.play.waited >= 100, 'the player was waited for once its source was connected: ' + a.diag.play.waited);
+        assert.strictEqual(a.diag.play.error, 'Service unavailable for call playFile() | the player does not answer');
         await a.release();
+    });
+
+    // ---- 0.4.2: a head unit that does not offer the measured player (iDrive 8, on a car: "Service unavailable for call playFile()")
+    // a binding whose players answer or not by description and instance: up = { 'mp|OapGenericMedia': true, ... }
+    const mkPlayers = (root, files) => {
+        fs.mkdirSync(root, { recursive: true });
+        fs.writeFileSync(path.join(root, 'org_genivi_am_commandinterface_CommandControl.json'), JSON.stringify({ name: 'CommandControl', serviceId: 4660, instances: { 1: 1 } }));
+        Object.keys(files).forEach((f) => fs.writeFileSync(path.join(root, f), JSON.stringify(files[f])));
+    };
+    const playersSip = (up, sources, after) => ({ built: [], buildProxy: async function (cfg, inst) {
+        this.built.push(cfg.name + '|' + inst);
+        const px = await someip.buildProxy(cfg, inst);
+        if (cfg.name === 'CommandControl') {
+            return Object.assign(px, { getValue: async (n) => (n === 'listOfMainSources' ? sources : n === 'listOfMainSinks' ? [{ sinkID: 1024, name: 'AMP' }] : []),
+                callMethod: async (m, a) => { calls.push({ inst: inst, m: m, a: a }); if (m === 'connect' && after) after(); return m === 'connect' ? { mainConnectionID: 90, amError: 'E_OK' } : { amError: 'E_OK' }; } });
+        }
+        const subsOf = {};
+        return Object.assign(px, { tag: cfg.name + '|' + inst, subsOf: subsOf, isAvailable: async () => !!up[cfg.name + '|' + inst], subscribe: (x) => { subsOf[x.name] = x.onReceive; },
+            callMethod: async (m, a) => { calls.push({ inst: cfg.name + '|' + inst, m: m, a: a }); if (!up[cfg.name + '|' + inst]) throw new Error('Service unavailable for call ' + m + '()'); return { EntError: 'OK' }; } });
+    } });
+    const quick = { playerWaitMs: 40, probeMs: 40, playerAfterMs: 60, probeAgainMs: 20, availWaitMs: 200 };
+    const MPF = 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json', MP2F = 'de_bmw_infotainment_entertainment_mediaplayer2_MediaPlayer2.json';
+    const SRC = [{ sourceID: 1046, name: 'OapGenericMedia' }, { sourceID: 2050, name: 'OAP_GENERIC_MEDIA_PLAYER' }, { sourceID: 129, name: 'Tuner' }];
+
+    await t('the measured player not offered: the same instance under a numbered description is used (every instance asked once, the events heard of the one in use)', async () => {
+        const root = mkRoot('pl1'), lines = [], seenEv = [];
+        mkPlayers(root, { [MPF]: { name: 'mp', serviceId: 100, instances: { OapGenericMedia: 3, Usb: 1 } }, [MP2F]: { name: 'mp2', serviceId: 200, instances: { OapGenericMedia: 3, Bt: 7 } } });
+        // an app's copy of the first: the same service and instances, not asked again
+        fs.mkdirSync(path.join(root, 'oap', 'oap_13001', 'someipInterfaces'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'oap', 'oap_13001', 'someipInterfaces', MPF), JSON.stringify({ name: 'mpApp', serviceId: 100, instances: { OapGenericMedia: 3 } }));
+        const up = { 'mp|Usb': true, 'mp2|OapGenericMedia': true, 'mp2|Bt': true };
+        const sip = playersSip(up, SRC);
+        const a = new Audio(Object.assign({ someip: sip, srcGen: root, oapRoot: path.join(root, 'oap'), audioConf: path.join(root, 'audio.json'), log: (m) => lines.push(m) }, quick),
+            { time() {}, state: (v) => seenEv.push(v), error() {} });
+        await a.start();
+        assert.deepStrictEqual(sip.built, ['CommandControl|1', 'mp|OapGenericMedia', 'mp|Usb', 'mp2|OapGenericMedia', 'mp2|Bt']);
+        assert.strictEqual(a.mp.tag, 'mp2|OapGenericMedia');
+        assert.ok(lines.some((l) => l === 'the MediaPlayer "OapGenericMedia" is not offered on this head unit: using "OapGenericMedia" of ' + path.join(root, MP2F)), lines.join('|'));
+        assert.strictEqual(a.src, 1046, 'the measured instance keeps its source');
+        assert.deepStrictEqual(a.diag.players.map((x) => x.inst + ' ' + x.available + ' ' + path.basename(x.file)),
+            ['OapGenericMedia false ' + MPF, 'Usb true ' + MPF, 'OapGenericMedia true ' + MP2F, 'Bt true ' + MP2F]);
+        assert.strictEqual(a.diag.mp.file, path.join(root, MP2F));
+        assert.strictEqual(a.diag.mp.available, true);
+        calls.length = 0;
+        await a.playNow('/x/audio.m4a');
+        assert.deepStrictEqual(called('playFile').map((c) => c.inst), ['mp2|OapGenericMedia']);
+        assert.strictEqual(a.diag.play.error, null);
+        // only the player in use is heard
+        a.heard[0].subsOf.playerState('OLD');
+        a.mp.subsOf.playerState('NEW');
+        assert.deepStrictEqual(seenEv, ['NEW']);
+        await a.release();
+        // the same instance under the first description comes up later: the one in use answers, nothing moves
+        up['mp|OapGenericMedia'] = true;
+        calls.length = 0;
+        await a.playNow('/x/audio.m4a');
+        assert.deepStrictEqual(called('playFile').map((c) => c.inst), ['mp2|OapGenericMedia']);
+        assert.strictEqual(sip.built.length, 5, 'no proxy built twice');
+        await a.release();
+    });
+
+    await t('the measured player not offered: the only offered one named like the generic OAP player, with the audio source named like it; none like it, or audio.json naming one: nothing changes', async () => {
+        const root = mkRoot('pl2'), lines = [];
+        mkPlayers(root, { [MPF]: { name: 'mp', serviceId: 100, instances: { OapGenericMedia: 3, Usb: 1, OapGenericMediaPlayer: 9, Bluetooth: 4 } } });
+        const up = { 'mp|Usb': true, 'mp|OapGenericMediaPlayer': true };
+        let a = new Audio(Object.assign({ someip: playersSip(up, SRC), srcGen: root, audioConf: path.join(root, 'audio.json'), log: (m) => lines.push(m) }, quick), H);
+        await a.start();
+        assert.strictEqual(a.mp.tag, 'mp|OapGenericMediaPlayer');
+        assert.strictEqual(a.src, 2050);
+        assert.ok(lines.some((l) => l === 'the MediaPlayer "OapGenericMedia" is not offered on this head unit: using "OapGenericMediaPlayer"'), lines.join('|'));
+        assert.ok(lines.some((l) => l === 'audio source 2050 (OAP_GENERIC_MEDIA_PLAYER) goes with the MediaPlayer "OapGenericMediaPlayer"'), lines.join('|'));
+        calls.length = 0;
+        await a.playNow('/x/audio.m4a');
+        assert.deepStrictEqual(called('connect')[0].a, { sourceID: 2050, sinkID: 1024 });
+        assert.deepStrictEqual(called('playFile').map((c) => c.inst), ['mp|OapGenericMediaPlayer']);
+        await a.release();
+        // the measured instance comes up later: the next play goes back to it, and to its source
+        up['mp|OapGenericMedia'] = true;
+        calls.length = 0;
+        await a.playNow('/x/audio.m4a');
+        assert.deepStrictEqual(called('connect')[0].a, { sourceID: 1046, sinkID: 1024 });
+        assert.deepStrictEqual(called('playFile').map((c) => c.inst), ['mp|OapGenericMedia']);
+        await a.release();
+        delete up['mp|OapGenericMedia'];
+        // audio.json names the instance: no other is taken for it
+        fs.writeFileSync(path.join(root, 'audio.json'), JSON.stringify({ instance: 'OapGenericMedia' }));
+        a = new Audio(Object.assign({ someip: playersSip(up, SRC), srcGen: root, audioConf: path.join(root, 'audio.json'), log() {} }, quick), H);
+        await a.start();
+        assert.strictEqual(a.mp.tag, 'mp|OapGenericMedia');
+        assert.strictEqual(a.diag.mp.available, false);
+        fs.unlinkSync(path.join(root, 'audio.json'));
+        // no offered player is named like it (Usb and Bluetooth are other people's players): the play says so
+        const up2 = { 'mp|Usb': true, 'mp|Bluetooth': true };
+        a = new Audio(Object.assign({ someip: playersSip(up2, SRC), srcGen: root, audioConf: path.join(root, 'audio.json'), log() {} }, quick), H);
+        await a.start();
+        assert.strictEqual(a.mp.tag, 'mp|OapGenericMedia');
+        assert.strictEqual(a.diag.ready, true);
+        calls.length = 0;
+        await assert.rejects(a.playNow('/x/audio.m4a'), /^Error: the car does not offer the media player "OapGenericMedia" on this head unit \(Settings > Diagnostics\)$/);
+        assert.deepStrictEqual(called('playFile').map((c) => c.inst), ['mp|OapGenericMedia'], 'nobody else\'s player is tried');
+        await a.release();
+        // two offered ones named like it: not chosen between
+        const up3 = { 'mp|OapGenericMediaPlayer': true, 'mp2|OapGenericMediaTwo': true };
+        mkPlayers(root, { [MP2F]: { name: 'mp2', serviceId: 200, instances: { OapGenericMediaTwo: 5 } } });
+        a = new Audio(Object.assign({ someip: playersSip(up3, SRC), srcGen: root, audioConf: path.join(root, 'audio.json'), log() {} }, quick), H);
+        await a.start();
+        assert.strictEqual(a.mp.tag, 'mp|OapGenericMedia');
+    });
+
+    await t('a player the head unit starts with its source: waited for once the source is connected, then played', async () => {
+        const root = mkRoot('pl3');
+        mkPlayers(root, { [MPF]: { name: 'mp', serviceId: 100, instances: { OapGenericMedia: 3 } } });
+        const up = {};
+        const sip = playersSip(up, SRC, () => setTimeout(() => { up['mp|OapGenericMedia'] = true; }, 150));
+        const a = new Audio(Object.assign({ someip: sip, srcGen: root, audioConf: path.join(root, 'audio.json'), log() {} }, quick, { playerAfterMs: 2000 }), H);
+        await a.start();
+        assert.strictEqual(a.diag.mp.available, false);
+        calls.length = 0;
+        await a.playNow('/x/audio.m4a');
+        assert.deepStrictEqual(calls.filter((c) => c.m === 'connect' || c.m === 'playFile').map((c) => c.m), ['connect', 'playFile']);
+        assert.ok(a.diag.play.waited >= 100 && a.diag.play.waited < 1500, String(a.diag.play.waited));
+        assert.strictEqual(a.diag.play.player, true);
+        assert.strictEqual(a.diag.play.error, null);
+        await a.release();
+    });
+
+    await t('the page: who the unit\'s SOME/IP security lets ask for and offer a service', async () => {
+        const { someipPolicies } = require('../ytd.js');
+        const root = mkRoot('pol'), dir = path.join(root, 'vsomeip');
+        const put = (rel, o) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), typeof o === 'string' ? o : JSON.stringify(o)); };
+        const me = process.getuid() + '_' + process.getgid();
+        put('13001_13001/policy.json', { security: { check_credentials: 'true', policies: [{ credentials: { uid: 13001, gid: 13001 }, allow: { requests: [{ service: '0x64', instances: [{ ids: ['0x3'], methods: 'any' }] }, { service: '0x1234', instance: 'any' }] } }] } });
+        put('1016_1016/policy.json', { security: { policies: [{ credentials: { uid: '1016', gid: '1016' }, allow: { offers: [{ service: 100, instance: '0x3' }, { service: { first: '0x1000', last: '0x1fff' }, instance: 'any' }] } }] } });
+        put(me + '/policy.json', { security: { policies: [{ allow: { requests: [{ service: '0x1234', instance: 'any' }] }, deny: { requests: [{ service: '0x64' }] } }] } });
+        put('base.json', { security: { allow_remote_clients: false, policies: [{ credentials: { uid: 0, gid: 77 }, allow: { requests: [{ service: '0x64' }] } }] } });
+        put('13002_13002/broken.json', '{ not json');
+        const l = someipPolicies([dir, path.join(root, 'none')], [{ name: 'CommandControl', id: 0x1234 }, { name: 'MediaPlayer', id: 100 }, { name: 'Other', id: null }]);
+        assert.ok(l[0].indexOf('SOME/IP security: ' + dir + ' has 5 files for 4 clients (') === 0 && / \| check_credentials true \| allow_remote_clients false \| this service runs as \d+_\d+: has a policy$/.test(l[0]), l[0]);
+        const byName = (l2) => l2.sort((x, y) => (x.split(' ')[0] < y.split(' ')[0] ? -1 : 1)).join(', ');
+        assert.strictEqual(l[1], 'CommandControl (service 0x1234): may be asked for by ' + byName(['13001_13001 [any]', me + ' [any]']) + ' | offered by 1016_1016 [any] | this service (' + me + ') may ask: yes');
+        assert.strictEqual(l[2], 'MediaPlayer (service 0x64): may be asked for by ' + byName(['13001_13001 [[{ids:[0x3],methods:any}]]', '0_77']) + ' | offered by 1016_1016 [0x3] | also named (denied or other) for ' + me + ' | this service (' + me + ') may ask: NOT NAMED');
+        assert.strictEqual(l[3], 'Other: its description gives no service id, the policies cannot be read for it');
+        assert.deepStrictEqual(someipPolicies([path.join(root, 'none')], []), ['SOME/IP security: no policies (' + path.join(root, 'none') + ' not there)']);
+    });
+
+    await t('a daemon on a head unit without the player: the page names the players asked, the policies, and how the installed apps play media (read in the background)', async () => {
+        const root = mkRoot('pl5'), oap = path.join(root, 'oap');
+        mkPlayers(root, { [MPF]: { name: 'mp', serviceId: 100, instances: { OapGenericMedia: 3, Usb: 1 } } });
+        const js = (rel, text) => { fs.mkdirSync(path.dirname(path.join(oap, rel)), { recursive: true }); fs.writeFileSync(path.join(oap, rel), text + '\n' + '/* pad */'.repeat(40)); };
+        js('oap_13001/node_modules/bmw-music/javascript/app.js', 'var a=buildProxy("de.bmw.infotainment.entertainment.mediaplayer2.MediaPlayer2","OnlineGenericMedia");a.playUrl({url:u});require("oap-sdk/src/media/MediaSession.js");');
+        js('oap_13002/node_modules/bmw-radio/javascript/app.js', "p=get('OnlineGenericMedia');p.playUrl(x);q='org.genivi.am.commandinterface.CommandControl'");
+        js('oap_13003/node_modules/jap_ridetube8/app/main.js', 'x="OapGenericMedia";y.playFile(1)');
+        js('oap_13004/node_modules/other/javascript/app.js', 'nothing here about it');
+        fs.mkdirSync(path.join(root, 'vsomeip', '0_0'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'vsomeip', '0_0', 'policy.json'), JSON.stringify({ security: { policies: [{ allow: { requests: [{ service: 4660, instance: 'any' }] } }] } }));
+        const lg = [];
+        const d5 = new Daemon(Object.assign({ someip: playersSip({ 'mp|Usb': true }, SRC), srcGen: root, oapRoot: oap, policyDirs: [path.join(root, 'vsomeip')], mainapps: [], ytdec: fakeYtdec, cacheDir: path.join(root, 'cache'), logDir: tmp,
+            sock: path.join(tmp, 'ctl5.sock'), stateDir: path.join(tmp, 'st5'), noSetuid: true, spare: false, resume: false, fetchRetryMs: [], noHwCheck: true, accountFile: path.join(tmp, 'acct5.json'),
+            ytRequest: fakeYt, audioConf: path.join(root, 'audio.json'), codeScanDelayMs: 30, log: (m) => lg.push(m) }, quick));
+        await d5.start();
+        await waitUntil(() => d5.code && d5.code.state === 'done', 4000);
+        const c5 = await client(path.join(tmp, 'ctl5.sock'));
+        c5.send({ cmd: 'diag' });
+        const m = await c5.waitFor((x) => x.ev === 'diag');
+        const all = m.lines.join('\n');
+        assert.strictEqual(m.ready, true);
+        assert.ok(all.indexOf('MediaPlayer: description ' + path.join(root, MPF) + ' | instance OapGenericMedia of [OapGenericMedia, Usb] | service 0x64, instance 0x3 | answers: NO') >= 0, all);
+        assert.ok(all.indexOf('Players the car offers (of this description): OapGenericMedia=0x3 NO | Usb=0x1 yes') >= 0, all);
+        assert.ok(/# Who may use them\nSOME\/IP security: .* has 1 files for 1 clients \(0_0\)/.test(all), all);
+        assert.ok(/\nCommandControl \(service 0x1234\): may be asked for by 0_0 \[any\] \| offered by nobody \| /.test(all), all);
+        assert.ok(/\nMediaPlayer \(service 0x64\): may be asked for by nobody \| offered by nobody \| this service \(\d+_\d+\) may ask: NOT NAMED/.test(all), all);
+        assert.ok(all.indexOf('# How the installed apps play media\n3 files of the installed apps and the app manager read\n' +
+            'instances: OnlineGenericMedia (oap_13001:bmw-music, oap_13002:bmw-radio)\n' +
+            'interfaces: de.bmw.infotainment.entertainment.mediaplayer2.MediaPlayer2 (oap_13001:bmw-music) | org.genivi.am.commandinterface.CommandControl (oap_13002:bmw-radio)\n' +
+            'calls: playUrl (oap_13001:bmw-music, oap_13002:bmw-radio)\n' +
+            'SDK modules: oap-sdk/src/media/MediaSession.js (oap_13001:bmw-music)\n') >= 0, all);
+        assert.ok(lg.some((l) => /^apps' code read for how they play media: 3 files, 1 instances, 2 interfaces, 1 calls, 1 SDK modules$/.test(l)), lg.join('|'));
+        c5.destroy();
+        await d5.close();
     });
 
     await t('a daemon whose audio never comes up: a play ends with the reason (not "audio service timed out"), diag says NOT READY, the start goes on trying', async () => {
@@ -1564,7 +1747,7 @@ async function main() {
         mkVideo('AudioDown01');
         c4.send({ cmd: 'play', id: 'AudioDown01', rect: '100x100' });
         const e = await c4.waitFor((x) => x.ev === 'error', 4000);
-        assert.strictEqual(e.msg, 'the car\'s audio is not ready - the car\'s audio manager (CommandControl) does not answer (Settings > Diagnostics)');
+        assert.strictEqual(e.msg, 'the car\'s audio is not ready - the car\'s audio manager (CommandControl) does not answer (Settings > Diagnostics)', lg.join(' || '));
         await c4.waitFor((x) => x.ev === 'state' && x.state === 'error');
         c4.send({ cmd: 'diag' });
         const m = await c4.waitFor((x) => x.ev === 'diag');

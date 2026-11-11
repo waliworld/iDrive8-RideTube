@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.4.1';
+const VERSION = '0.4.2';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -77,6 +77,11 @@ function defaults() {
         // the unit's interface catalog and the app manager's bundles (its generator): Audio.generate
         catalogs: ['/etc/oap/someip/someip-interfaces.json'],
         searchRoots: ['/usr/lib', '/usr/share', '/etc', '/opt', '/var/opt/public'], // the Diagnostics page's search, when a description is missing
+        playerWaitMs: 3000,   // at the start, the media player given this long to answer before another is looked for
+        probeMs: 3000,        // ... and the players asked for this long
+        playerAfterMs: 4000,  // at a play, a player that does not answer given this long once its source is connected
+        policyDirs: ['/etc/vsomeip'], // the unit's SOME/IP security policies (the Diagnostics page: who may ask for the player)
+        codeScanDelayMs: 45000, // how long after its start the service reads the installed apps' code, when the player is not offered
         generators: MAINAPPS.reduce(function (l, m) {
             return l.concat([path.join(m.root, 'src', 'AppManagement', 'AppManagement.js'), path.join(m.root, 'src', 'AppManagement', 'AppManagement.bundle.js')]);
         }, []),
@@ -703,6 +708,14 @@ function offered(cfg) {
     });
     return out;
 }
+/* The SOME/IP ids a description gives its service and an instance ({ service, instance }: numbers, or null where it
+ * does not say them as MainApp's descriptions do: serviceId, instances: { name: id }). */
+function idsOf(cfg, inst) {
+    const num = (v) => (typeof v === 'number' && isFinite(v) ? v : typeof v === 'string' && /^(0x[0-9a-f]+|\d+)$/i.test(v) ? Number(v) : null);
+    const i = cfg && cfg.instances && !Array.isArray(cfg.instances) ? cfg.instances[inst] : null;
+    return { service: num(cfg && cfg.serviceId), instance: num(i && typeof i === 'object' ? (i.instanceId !== undefined ? i.instanceId : i.id) : i) };
+}
+const hex = (n) => (n === null || n === undefined ? '?' : '0x' + n.toString(16));
 function errText(e) {
     if (e && typeof e === 'object' && !e.message) { try { return JSON.stringify(e); } catch (x) { /* as a string below */ } }
     return String(e && e.message || e);
@@ -718,13 +731,16 @@ function Audio(opts, handlers) {
     this.sink = SINK_ID;
     this.srcListed = null;  // the audio manager lists our source / sink (null: it gave no list)
     this.sinkListed = null;
-    this.building = {};     // 'name|instance' -> its proxy, built and started (a try that timed out is joined by the next)
+    this.building = {};     // 'name|description|instance' -> its proxy, built and started (a try that timed out is joined by the next)
+    this.used = null;       // the player in use: { file, cfg, inst, px }
+    this.heard = [];        // the players whose events are subscribed (listen)
+    this.listed = null;     // the audio manager's lists as last read (lists)
     this.px = { cc: null, mp: null }; // the proxies as they come up (the Diagnostics page asks them)
     this.made = {};         // interface id -> the generator's answer (generate), asked once
     // where the start is and what the car answered: the app's Diagnostics page (Daemon.diagLines), and the reason a
     // play gets while the audio is not up (why)
     this.diag = { stage: 'not started', error: null, short: null, tries: 0, ready: false, binding: null,
-        cc: null, mp: null, sources: null, sinks: null, conns: null, notes: [], play: null, events: {} };
+        cc: null, mp: null, sources: null, sinks: null, conns: null, notes: [], play: null, events: {}, players: null };
 }
 /* Said once in the log and kept for the Diagnostics page (the last 8). */
 Audio.prototype.note = function (m) {
@@ -758,6 +774,28 @@ Audio.prototype.appDirs = function () {
     try { names = fs.readdirSync(root).filter((n) => /^oap_\d+$/.test(n)).sort(); } catch (e) { return []; }
     return names.map((n) => path.join(root, n, 'someipInterfaces'));
 };
+/* Every description of CommandControl ('cc') or the MediaPlayer ('mp') this head unit has, the likeliest first: its
+ * file in each of MainApp's folders, files named like it there (a numbered interface), then the same two in the
+ * installed apps' someipInterfaces/: [{ file, cfg, insts, exact, app }]. */
+Audio.prototype.candidates = function (kind) {
+    const file = kind === 'cc' ? CC_FILE : MP_FILE, like = kind === 'cc' ? CC_LIKE : MP_LIKE;
+    const out = [];
+    const add = (p, exact, app) => {
+        const cfg = readJsonCapped(p, MAX_IFACE_JSON);
+        if (cfg && typeof cfg === 'object') out.push({ file: p, cfg: cfg, insts: instancesOf(cfg) || [], exact: exact, app: app });
+    };
+    const scan = (dirs, app) => {
+        dirs.forEach((d) => add(path.join(d, file), true, app));
+        dirs.forEach((d) => {
+            let names = [];
+            try { names = fs.readdirSync(d); } catch (e) { return; }
+            names.filter((n) => n !== file && like.test(n)).sort().forEach((n) => add(path.join(d, n), false, app));
+        });
+    };
+    scan(this.opts.srcGen ? [this.opts.srcGen] : this.opts.srcGens || SRC_GENS, false);
+    scan(this.appDirs(), true);
+    return out;
+};
 /* The description of CommandControl ('cc') or the MediaPlayer ('mp') as { cfg, file }, with the instance wanted:
  *   1. its file in MainApp's folders (iface: where iDrive 7 has it);
  *   2. the same file in an installed app's someipInterfaces/;
@@ -766,28 +804,15 @@ Audio.prototype.appDirs = function () {
  * Of several, the one that has the instance wanted, else the one with the most instances. None: the error of 1,
  * which names MainApp's folders. */
 Audio.prototype.describe = function (kind, want) {
-    const file = kind === 'cc' ? CC_FILE : MP_FILE, like = kind === 'cc' ? CC_LIKE : MP_LIKE;
+    const file = kind === 'cc' ? CC_FILE : MP_FILE;
     const name = kind === 'cc' ? 'CommandControl' : 'MediaPlayer';
     let first;
     try { return { cfg: this.iface(file), file: this.ifaceFile }; } catch (e) { first = e; }
-    const dirs = this.opts.srcGen ? [this.opts.srcGen] : this.opts.srcGens || SRC_GENS;
-    const apps = this.appDirs();
-    const cands = [];
-    const add = (p) => {
-        const cfg = readJsonCapped(p, MAX_IFACE_JSON);
-        if (cfg && typeof cfg === 'object') cands.push({ file: p, cfg: cfg, insts: instancesOf(cfg) || [] });
-    };
-    apps.forEach((d) => add(path.join(d, file)));
-    if (!cands.length) {
-        dirs.concat(apps).forEach((d) => {
-            let names = [];
-            try { names = fs.readdirSync(d); } catch (e) { return; }
-            names.filter((n) => n !== file && like.test(n)).sort().forEach((n) => add(path.join(d, n)));
-        });
-    }
+    const all = this.candidates(kind).filter((c) => c.app || !c.exact);
+    const cands = all.some((c) => c.exact) ? all.filter((c) => c.exact) : all;
     if (cands.length) {
         const has = (c) => (c.insts.indexOf(want) >= 0 ? 1 : 0);
-        cands.sort((a, b) => has(b) - has(a) || b.insts.length - a.insts.length);
+        cands.sort((x, y) => has(y) - has(x) || y.insts.length - x.insts.length);
         this.note('the ' + name + ' description is not in MainApp\'s folders: using ' + cands[0].file);
         return { cfg: cands[0].cfg, file: cands[0].file };
     }
@@ -870,10 +895,11 @@ Audio.prototype.binding = function () {
     }
     return this.someip;
 };
-/* The proxy of an interface instance, built and started: from a fresh tick (as BMW's SDK calls the binding), once -
- * a try that ran out of time (stageMs) is joined by the next one, a failed one is made again. */
-Audio.prototype.proxy = function (name, cfg, inst) {
-    const k = name + '|' + inst;
+/* The proxy of an instance of the interface a description (file) describes, built and started: from a fresh tick (as
+ * BMW's SDK calls the binding), once - a try that ran out of time (ms, else stageMs) is joined by the next one, a
+ * failed one is made again. */
+Audio.prototype.proxy = function (name, cfg, inst, file, ms) {
+    const k = name + '|' + (file || '') + '|' + inst;
     if (!this.building[k]) {
         const someip = this.binding();
         const p = new Promise((resolve, reject) => setImmediate(() => {
@@ -882,7 +908,7 @@ Audio.prototype.proxy = function (name, cfg, inst) {
         this.building[k] = p;
         p.catch(() => { if (this.building[k] === p) delete this.building[k]; });
     }
-    return withTimeout(this.building[k], this.opts.stageMs || 8000, 'starting the ' + name + ' proxy').catch((e) => {
+    return withTimeout(this.building[k], ms || this.opts.stageMs || 8000, 'starting the ' + name + ' proxy').catch((e) => {
         if (/timed out$/.test(errText(e))) e.short = 'the car\'s ' + name + ' does not start';
         throw e;
     });
@@ -926,9 +952,11 @@ Audio.prototype.bringUp = async function () {
     });
     if (failed) throw failed;
     d.stage = 'starting the CommandControl proxy';
-    const cc = this.px.cc = await this.proxy('CommandControl', found.cc.cfg, found.cc.inst);
+    const cc = this.px.cc = await this.proxy('CommandControl', found.cc.cfg, found.cc.inst, found.cc.file);
     d.stage = 'starting the MediaPlayer proxy';
-    const mp = this.px.mp = await this.proxy('MediaPlayer', found.mp.cfg, found.mp.inst);
+    const mp = this.px.mp = await this.proxy('MediaPlayer', found.mp.cfg, found.mp.inst, found.mp.file);
+    d.cc.ids = idsOf(found.cc.cfg, found.cc.inst);
+    d.mp.ids = idsOf(found.mp.cfg, found.mp.inst);
     // the route, where the audio manager answers already (at boot it may not yet: start reads it once it does)
     d.cc.available = await this.answers(cc);
     d.mp.available = await this.answers(mp);
@@ -936,15 +964,104 @@ Audio.prototype.bringUp = async function () {
         d.stage = 'reading the audio manager\'s sources and sinks';
         await this.route(cc, conf);
     }
-    const h = this.h;
-    // (the player's last events are kept for the Diagnostics page)
-    const safe = (k, fn) => (v) => { d.events[k] = v; try { fn(v); } catch (e) { this.opts.log('someip handler: ' + (e && e.stack || e)); } };
+    this.cc = cc;
+    this.mp = mp;
+    this.used = { file: found.mp.file, cfg: found.mp.cfg, inst: found.mp.inst, px: mp };
+    this.listen(mp);
+    d.stage = 'the proxies are up';
+};
+/* The player's events to the daemon's handlers: heard of the player in use only (findPlayer may change it), each
+ * player subscribed once. The last of each is kept for the Diagnostics page. */
+Audio.prototype.listen = function (mp) {
+    if (this.heard.indexOf(mp) >= 0) return;
+    this.heard.push(mp);
+    const d = this.diag, h = this.h;
+    const safe = (k, fn) => (v) => {
+        if (mp !== this.mp) return;
+        d.events[k] = v;
+        try { fn(v); } catch (e) { this.opts.log('someip handler: ' + (e && e.stack || e)); }
+    };
     mp.subscribe({ name: 'playerState', onReceive: safe('state', h.state) });
     mp.subscribe({ name: 'currentItemTime', onReceive: safe('time', h.time) });
     mp.subscribe({ name: 'playbackErrorEvent', onReceive: safe('error', h.error) });
-    this.cc = cc;
-    this.mp = mp;
-    d.stage = 'the proxies are up';
+};
+/* The players this head unit offers now: every instance of every description of the MediaPlayer it has (the one in
+ * use first; the same service and instance under two descriptions asked once; at most 32) given a proxy and asked,
+ * for up to waitMs. Kept for the Diagnostics page; returned with the proxies. */
+Audio.prototype.probePlayers = async function (waitMs) {
+    const seen = {}, list = [], u = this.used, want = this.conf().inst;
+    const push = (c, inst) => {
+        const ids = idsOf(c.cfg, inst);
+        const k = ids.service !== null && ids.instance !== null ? ids.service + '|' + ids.instance : (c.app ? path.basename(c.file) : c.file) + '|' + inst;
+        if (seen[k] || list.length >= 32) return;
+        seen[k] = true;
+        list.push({ file: c.file, cfg: c.cfg, inst: inst, ids: ids, px: null, available: null, error: null });
+    };
+    if (u) push(u, u.inst);
+    this.candidates('mp').forEach((c) => (c.insts.length ? c.insts : [want]).forEach((i) => push(c, i)));
+    for (const x of list) {
+        try { x.px = await this.proxy('MediaPlayer', x.cfg, x.inst, x.file, 3000); } catch (e) { x.error = errText(e); }
+    }
+    const end = Date.now() + waitMs;
+    for (;;) {
+        for (const x of list) if (x.px && !x.available) x.available = await this.answers(x.px);
+        if (Date.now() >= end || list.every((x) => !x.px || x.available)) break;
+        await sleep(200);
+    }
+    this.diag.players = list.map((x) => ({ file: x.file, inst: x.inst, ids: x.ids, available: x.available, error: x.error }));
+    return list;
+};
+/* The player to play with, looked for when the one in use is not offered (or is not the measured one): of those the
+ * car offers now, the instance wanted (audio.json's, else iDrive 7's) under whichever description; else the one in
+ * use; else, unless audio.json names the instance, the only instance named like the generic OAP media player. A
+ * change is logged, and the audio source named like the new instance goes with it where the audio manager lists
+ * one. True when the player in use answers afterwards. */
+Audio.prototype.findPlayer = async function (waitMs) {
+    const conf = this.conf(), u = this.used;
+    const up = (await this.probePlayers(waitMs)).filter((x) => x.available);
+    let pick = up.filter((x) => x.inst === conf.inst)[0] || up.filter((x) => x.px === u.px)[0];
+    if (!pick && !conf.set.instance) {
+        const one = (re) => {
+            const names = up.map((x) => x.inst).filter((n, i, l) => re.test(n) && l.indexOf(n) === i);
+            return names.length === 1 ? up.filter((x) => x.inst === names[0])[0] : null;
+        };
+        pick = one(/oap.?generic.?media/i) || one(/generic.?media|oap/i);
+    }
+    if (!pick) return false;
+    if (pick.px === u.px) return true;
+    const d = this.diag, has = offered(pick.cfg);
+    this.used = { file: pick.file, cfg: pick.cfg, inst: pick.inst, px: pick.px };
+    this.mp = this.px.mp = pick.px;
+    this.listen(pick.px);
+    d.mp = { file: pick.file, instances: instancesOf(pick.cfg), instance: pick.inst, available: true, error: null, ids: pick.ids,
+        lacks: has ? MP_NEEDS.filter((n) => has.indexOf(n) < 0) : null };
+    this.note('the MediaPlayer "' + u.inst + '" is not offered on this head unit: using "' + pick.inst + '"' + (pick.file !== u.file ? ' of ' + pick.file : ''));
+    // its source: the configured one for the measured instance (route), else the one named like the instance
+    this.src = conf.src;
+    await this.route(this.cc, conf);
+    const l = this.listed;
+    if (!conf.set.sourceID && pick.inst !== conf.inst && l && l.sources) {
+        const norm = (v) => String(v).toLowerCase().replace(/[^a-z0-9]/g, '');
+        const hit = l.sources.filter((x) => norm(l.name(x)) === norm(pick.inst) && l.idOf(x, 'sourceID') !== null);
+        if (hit.length === 1 && l.idOf(hit[0], 'sourceID') !== this.src) {
+            this.src = l.idOf(hit[0], 'sourceID');
+            this.srcListed = true;
+            this.note('audio source ' + this.src + ' (' + l.name(hit[0]) + ') goes with the MediaPlayer "' + pick.inst + '"');
+        }
+    }
+    return true;
+};
+/* At the start: the player in use given playerWaitMs to answer; when it does not, one that does is looked for
+ * (findPlayer). Never an error: a play says what is missing. */
+Audio.prototype.settlePlayer = async function () {
+    const ms = (v, dflt) => (v === undefined ? dflt : v);
+    try {
+        const end = Date.now() + ms(this.opts.playerWaitMs, 3000);
+        let up = await this.answers(this.mp);
+        while (!up && Date.now() < end) { await sleep(200); up = await this.answers(this.mp); }
+        this.diag.mp.available = up;
+        if (!up) this.diag.mp.available = await this.findPlayer(ms(this.opts.probeMs, 3000));
+    } catch (e) { this.note('looking for the media player failed: ' + errText(e)); }
 };
 /* The whole start, which the daemon repeats until it succeeds (Daemon.start): the proxies, the audio manager
  * answering, its lists read (the route), the connections a killed daemon left. */
@@ -959,6 +1076,8 @@ Audio.prototype.start = async function () {
             d.stage = 'reading the audio manager\'s sources and sinks';
             await this.route(this.cc, this.conf());
         }
+        d.stage = 'looking for the media player';
+        await this.settlePlayer();
         d.stage = 'looking for connections an earlier run left';
         const n = await this.dropLeftovers();
         d.ready = true; d.error = null; d.short = null; d.stage = 'ready';
@@ -989,7 +1108,8 @@ Audio.prototype.lists = async function (cc) {
     d.conns = conns ? conns.map((c) => idOf(c, 'mainConnectionID') + ':' + idOf(c, 'sourceID') + '>' + idOf(c, 'sinkID')).join(' ') : null;
     this.srcListed = sources && sources.length ? sources.some((x) => idOf(x, 'sourceID') === this.src) : null;
     this.sinkListed = sinks && sinks.length ? sinks.some((x) => idOf(x, 'sinkID') === this.sink) : null;
-    return { sources: sources, sinks: sinks, conns: conns, name: name, idOf: idOf };
+    this.listed = { sources: sources, sinks: sinks, conns: conns, name: name, idOf: idOf };
+    return this.listed;
 };
 // The audio manager's sources and sinks, logged (what a head unit other than the measured iDrive 7 has), and the
 // route checked against them. The source: when the one configured is not listed but exactly one source named like the
@@ -1070,11 +1190,16 @@ Audio.prototype.playNow = async function (file) {
     await this.init();
     await this.waitAvailable();
     // (what the car answered is kept for the Diagnostics page)
-    const play = this.diag.play = { file: path.basename(file), route: null, player: null, connect: null, playFile: null, error: null };
+    const play = this.diag.play = { file: path.basename(file), route: null, player: null, waited: 0, connect: null, playFile: null, error: null };
     // a rejection that is no Error (the binding's own) becomes one that says which call it was
     const call = (px, what, m, a) => Promise.resolve().then(() => px.callMethod(m, a, 5000))
         .catch((e) => { throw e instanceof Error && e.message ? e : new Error(what + ' failed: ' + errText(e)); });
+    const ms = (v, dflt) => (v === undefined ? dflt : v);
     try {
+        // the player: the measured one where the car offers it, else one it does offer (a short look: the proxies are up)
+        if (!(await this.answers(this.mp)) || (this.used && this.used.inst !== this.conf().inst)) {
+            try { await this.findPlayer(ms(this.opts.probeAgainMs, 500)); } catch (e) { this.note('looking for the media player failed: ' + errText(e)); }
+        }
         // a route the audio manager's lists did not settle at the start: looked at again
         if (this.srcListed === false || this.sinkListed === false) await this.route(this.cc, this.conf());
         play.route = this.src + '>' + this.sink;
@@ -1085,14 +1210,23 @@ Audio.prototype.playNow = async function (file) {
         if (!r || (r.amError !== 'E_OK' && r.amError !== 'E_ALREADY_EXISTS')) throw new Error('audio connect: ' + (r && r.amError));
         this.connId = r.mainConnectionID;
         if (this.connId === undefined || this.connId === null) this.connId = -1; // id unknown: release sweeps by source
+        // a player the head unit starts with its source: given a moment once the source is connected
+        if (play.player === false) {
+            const t0 = Date.now(), end = t0 + ms(this.opts.playerAfterMs, 4000);
+            while (Date.now() < end && !(play.player = await this.answers(this.mp))) await sleep(200);
+            play.waited = Date.now() - t0;
+        }
         const p = await call(this.mp, 'playFile', 'playFile', { path: file, languageCode: 7695972 });
         play.playFile = JSON.stringify(p);
         this.opts.log('playFile ' + JSON.stringify(p));
         if (!p || p.EntError !== 'OK') throw new Error('playFile: ' + (p && p.EntError));
     } catch (e) {
-        // the player's instance not offered on this head unit: say so, whatever the call answered
-        if (play.player === false && play.connect && !/MediaPlayer/.test(e.message)) e.message += ' (the car\'s MediaPlayer "' + (this.diag.mp && this.diag.mp.instance) + '" is not available)';
         play.error = errText(e);
+        // the player not offered on this head unit: that is what the driver is told, whatever the call answered
+        if (play.player === false && play.connect && !play.playFile) {
+            e.message = 'the car does not offer the media player "' + (this.used && this.used.inst) + '" on this head unit (Settings > Diagnostics)';
+            play.error += ' | the player does not answer';
+        }
         throw e;
     }
 };
@@ -1387,6 +1521,13 @@ Daemon.prototype.start = async function () {
             this.audioKick = null;
             this.readyResolve();
             if (i) this.log('audio ready after ' + (i + 1) + ' tries');
+            // a head unit that does not offer the player: how its own apps play media is read, once, a while after
+            // the start and in the background, for the Diagnostics page
+            if (this.audio.diag.mp && this.audio.diag.mp.available === false) {
+                const t = setTimeout(() => { this.scanCode().catch(() => {}); }, this.opts.codeScanDelayMs);
+                if (t.unref) t.unref();
+                this.timers.push(t);
+            }
             break;
         } catch (e) {
             const msg = errText(e);
@@ -1493,6 +1634,154 @@ function audioInventory(o, search) {
     }
     return out;
 }
+/* Who the unit's SOME/IP security names for a service: the policy files under dirs (vsomeip's; iDrive 8 keeps a
+ * folder <uid>_<gid> per client) read for the services [{ name, id }]. A client is the <uid>_<gid> folder a file
+ * is in, else its policy's credentials, else the file. Lines for the page. */
+function someipPolicies(dirs, services) {
+    const out = [], files = [];
+    const num = (v) => (typeof v === 'number' ? v : typeof v === 'string' && /^(0x[0-9a-f]+|\d+)$/i.test(v.trim()) ? Number(v.trim()) : null);
+    const cap = (l, n) => l.slice(0, n).join(', ') + (l.length > n ? ' (+' + (l.length - n) + ' more)' : '');
+    const walk = (dir, top, depth) => {
+        let names;
+        try { names = fs.readdirSync(dir).sort(); } catch (e) { return; }
+        names.forEach((n) => {
+            if (files.length >= 800) return;
+            const p = path.join(dir, n);
+            let st;
+            try { st = fs.statSync(p); } catch (e) { return; }
+            if (st.isDirectory()) { if (depth > 0) walk(p, top, depth - 1); } else if (st.isFile() && st.size <= (2 << 20)) files.push({ p: p, rel: path.relative(top, p) });
+        });
+    };
+    const there = dirs.filter((d) => fs.existsSync(d));
+    if (!there.length) return ['SOME/IP security: no policies (' + dirs.join(', ') + ' not there)'];
+    there.forEach((d) => walk(d, d, 3));
+    const clients = {}, flags = {};
+    const hits = services.map(() => ({ requests: {}, offers: {}, other: {} }));
+    files.forEach((f) => {
+        const j = readJsonCapped(f.p, 2 << 20);
+        if (j === undefined) return;
+        const folder = /^(\d+_\d+)(\/|$)/.exec(f.rel.split(path.sep).join('/'));
+        const visit = (node, keys, client) => {
+            if (!node || typeof node !== 'object') return;
+            if (!Array.isArray(node)) {
+                const c = node.credentials;
+                if (c && typeof c === 'object' && (c.uid !== undefined || c.gid !== undefined) && !folder) client = String(c.uid) + '_' + String(c.gid);
+                ['check_credentials', 'allow_remote_clients'].forEach((k) => { if (node[k] !== undefined && typeof node[k] !== 'object') flags[k] = String(node[k]); });
+                if (node.service !== undefined) {
+                    const sv = node.service && typeof node.service === 'object' ? [num(node.service.first), num(node.service.last)] : [num(node.service), num(node.service)];
+                    services.forEach((want, i) => {
+                        if (want.id === null || sv[0] === null || sv[1] === null || want.id < sv[0] || want.id > sv[1]) return;
+                        const kind = keys.indexOf('deny') >= 0 ? 'other' : keys.indexOf('requests') >= 0 ? 'requests' : keys.indexOf('offers') >= 0 ? 'offers' : 'other';
+                        const inst = node.instance !== undefined ? node.instance : node.instances;
+                        hits[i][kind][client] = inst === undefined ? '' : JSON.stringify(inst).replace(/"/g, '').slice(0, 48);
+                    });
+                }
+            }
+            Object.keys(node).forEach((k) => visit(node[k], Array.isArray(node) ? keys : keys.concat([k]), client));
+        };
+        const client = folder ? folder[1] : f.rel;
+        clients[client] = true;
+        visit(j, [], client);
+    });
+    const names = Object.keys(clients).sort();
+    const me = (typeof process.getuid === 'function' ? process.getuid() : '?') + '_' + (typeof process.getgid === 'function' ? process.getgid() : '?');
+    out.push('SOME/IP security: ' + there.join(', ') + ' has ' + files.length + ' files for ' + names.length + ' clients (' + cap(names, 8) + ')' +
+        Object.keys(flags).map((k) => ' | ' + k + ' ' + flags[k]).join('') + ' | this service runs as ' + me + ': ' + (clients[me] ? 'has a policy' : 'NO policy of its own'));
+    services.forEach((want, i) => {
+        if (want.id === null) { out.push(want.name + ': its description gives no service id, the policies cannot be read for it'); return; }
+        const list = (o) => { const k = Object.keys(o).sort(); return k.length ? cap(k.map((c) => c + (o[c] ? ' [' + o[c] + ']' : '')), 8) : 'nobody'; };
+        out.push(want.name + ' (service ' + hex(want.id) + '): may be asked for by ' + list(hits[i].requests) + ' | offered by ' + list(hits[i].offers) +
+            (Object.keys(hits[i].other).length ? ' | also named (denied or other) for ' + list(hits[i].other) : '') +
+            ' | this service (' + me + ') may ask: ' + (hits[i].requests[me] !== undefined ? 'yes' : 'NOT NAMED'));
+    });
+    return out;
+}
+/* How the apps installed on this head unit play media: their code (the .js of every app home and of the app manager,
+ * bounded in files, bytes and time, read one at a time with the loop free in between) searched for the player's
+ * instance names, the interfaces of the players and the audio manager, calls that start a playback, and the SDK's
+ * media modules. Kept on the daemon for the Diagnostics page: what a head unit unlike the measured one does instead
+ * of iDrive 7's "OapGenericMedia". */
+const CODE_FINDS = [
+    ['instances', /["'`]((?:[A-Za-z]*Generic[A-Za-z]*Media|Oap[A-Za-z]*Media|Online[A-Za-z]*Media|[A-Za-z]*MediaPlayerInst)[A-Za-z0-9_]*)["'`]/g],
+    ['interfaces', /\b((?:[a-z]\w*\.)+mediaplayer\d*\.[A-Z]\w+|org\.genivi\.am\.[\w.]+|(?:[a-z]\w*\.)+audiomanager\w*\.[A-Z]\w+)\b/g],
+    ['calls', /\b(playFile|playUrl|playUri|playStream|playItem|playTrack|setDataSource|requestAudioFocus|requestAudioSource|activateSource|startPlayback)\b\s*[(:=]/g],
+    ['SDK modules', /(oap-sdk\/src\/[\w/.-]*(?:media|audio|entertain|player|sound)[\w/.-]*)/gi],
+];
+Daemon.prototype.scanCode = async function () {
+    if (this.code) return this.code;
+    const o = this.opts, c = this.code = { state: 'running', files: 0, bytes: 0, found: {}, error: null };
+    try {
+        const list = [];
+        let left = 40000;
+        const walk = (dir, label, depth) => {
+            let names;
+            try { names = fs.readdirSync(dir); } catch (e) { return; }
+            for (const n of names) {
+                if (--left <= 0 || list.length >= 400) return;
+                const p = path.join(dir, n);
+                if (/\.js$/.test(n)) { list.push({ p: p, label: label }); continue; }
+                if (depth <= 0 || n[0] === '.' || /\.(json|node|so|png|jpg|svg|ttf|otf|tgz|gz|zip|map|css|html|txt|md|bin|dat|jsc)$/i.test(n)) continue;
+                let st;
+                try { st = fs.lstatSync(p); } catch (e) { continue; }
+                if (st.isDirectory()) walk(p, label, depth - 1);
+            }
+        };
+        let homes = [];
+        try { homes = fs.readdirSync(o.oapRoot).filter((n) => /^oap_\d+$/.test(n)).sort(); } catch (e) { /* none */ }
+        homes.forEach((h) => walk(path.join(o.oapRoot, h), h, 6));
+        (o.mainapps || []).forEach((m) => walk(path.join(m.root, 'src'), 'the app manager', 3));
+        const end = Date.now() + 60000;
+        for (const f of list) {
+            if (this.closed || Date.now() > end || c.bytes > (300 << 20)) break;
+            if (/jap_ridetube/.test(f.p)) continue;      // (our own app names what is looked for)
+            let text = null;
+            try {
+                const st = fs.statSync(f.p);
+                if (!st.isFile() || st.size < 200 || st.size > (12 << 20)) continue;
+                text = await new Promise((res) => fs.readFile(f.p, 'utf8', (e, t) => res(e ? null : t)));
+            } catch (e) { continue; }
+            if (text === null) continue;
+            c.files++;
+            c.bytes += text.length;
+            // the app: the package the file is in, where its path says one (an app's home is oap_<uid>)
+            const m = /node_modules\/([^/]+)\/(?!node_modules)/.exec(f.p.split(path.sep).join('/')) || /\/([^/]+)\/javascript\//.exec(f.p.split(path.sep).join('/'));
+            const app = f.label + (m && m[1] !== f.label ? ':' + m[1] : '');
+            CODE_FINDS.forEach((k) => {
+                const seen = c.found[k[0]] = c.found[k[0]] || {};
+                k[1].lastIndex = 0;
+                let x, n = 0;
+                while ((x = k[1].exec(text)) && n++ < 5000) {
+                    const v = x[1].slice(0, 90);
+                    if (!seen[v] && Object.keys(seen).length >= 60) continue;
+                    (seen[v] = seen[v] || {})[app] = true;
+                }
+            });
+            await sleep(15);
+        }
+        c.state = 'done';
+    } catch (e) {
+        c.state = 'failed';
+        c.error = errText(e);
+    }
+    this.log('apps\' code read for how they play media: ' + c.files + ' files, ' + CODE_FINDS.map((k) => Object.keys(c.found[k[0]] || {}).length + ' ' + k[0]).join(', '));
+    return c;
+};
+/* The page's lines of scanCode: each kind's finds, those most apps have first, with up to two of the apps. */
+Daemon.prototype.codeLines = function () {
+    const c = this.code;
+    if (!c) return ['Not read (only read when the car does not offer the media player; Refresh starts it).'];
+    const out = [c.state === 'running' ? 'Still reading (' + c.files + ' files so far): Refresh in a moment.' :
+        c.files + ' files of the installed apps and the app manager read' + (c.error ? ' | failed: ' + c.error : '')];
+    CODE_FINDS.forEach((k) => {
+        const seen = c.found[k[0]] || {};
+        const vals = Object.keys(seen).sort((x, y) => Object.keys(seen[y]).length - Object.keys(seen[x]).length || (x < y ? -1 : 1));
+        out.push(k[0] + ': ' + (vals.length ? vals.slice(0, 10).map((v) => {
+            const apps = Object.keys(seen[v]);
+            return v + ' (' + apps.slice(0, 2).join(', ') + (apps.length > 2 ? ' +' + (apps.length - 2) : '') + ')';
+        }).join(' | ') + (vals.length > 10 ? ' | +' + (vals.length - 10) + ' more' : '') : 'none found'));
+    });
+    return out;
+};
 /* The page's lines: '# ' starts a section. The sound first (what stops a play), then the files, the picture, the log. */
 Daemon.prototype.diagLines = async function () {
     const a = this.audio, d = a.diag, o = this.opts, out = [];
@@ -1501,7 +1790,8 @@ Daemon.prototype.diagLines = async function () {
     await a.refresh().catch(() => {});
     out.push('RideTube service ' + VERSION + ' | Node ' + process.version + ' | running ' + Math.round(process.uptime() / 60) + ' min | player: ' + this.state);
     out.push('# Sound');
-    out.push(d.ready ? 'Ready: the car\'s audio manager and player answer.'
+    out.push(d.ready ? (d.mp && d.mp.available === false ? 'The car\'s audio manager answers; its media player "' + d.mp.instance + '" does NOT (a play fails there).'
+        : 'Ready: the car\'s audio manager and player answer.')
         : 'NOT READY - ' + (d.error || 'starting') + ' | stopped at: ' + d.stage + ' | try ' + d.tries);
     out.push('SOME/IP binding: ' + (d.binding || 'not loaded' + (typeof o.someip === 'string' ? ' (' + o.someip + (fs.existsSync(o.someip) ? ' is there' : ' is NOT there') + ')' : '')));
     [['cc', 'CommandControl'], ['mp', 'MediaPlayer']].forEach((k) => {
@@ -1509,9 +1799,16 @@ Daemon.prototype.diagLines = async function () {
         if (!x) { out.push(k[1] + ': not looked for yet'); return; }
         out.push(k[1] + ': ' + (x.file ? 'description ' + x.file : 'NO description') +
             (x.instances ? ' | instance ' + (x.instance || '-') + ' of [' + x.instances.join(', ') + ']' : x.file ? ' | instance ' + (x.instance || '-') + ' (the description lists none)' : '') +
+            (x.ids && (x.ids.service !== null || x.ids.instance !== null) ? ' | service ' + hex(x.ids.service) + ', instance ' + hex(x.ids.instance) : '') +
             (x.file ? ' | answers: ' + yn(x.available) : '') + (x.lacks && x.lacks.length ? ' | the description lacks: ' + x.lacks.join(', ') : '') +
             (x.error && x.error !== d.error ? ' | ' + x.error : '') + (x.generator ? ' | generator: ' + x.generator : ''));
     });
+    if (d.players) {
+        // by description: which of its instances the car offers
+        const by = {};
+        d.players.forEach((x) => { (by[x.file] = by[x.file] || []).push(x.inst + (x.ids.instance !== null ? '=' + hex(x.ids.instance) : '') + ' ' + (x.error ? 'FAILED (' + x.error.slice(0, 60) + ')' : x.available ? 'yes' : 'NO')); });
+        Object.keys(by).forEach((f) => out.push('Players the car offers (' + (Object.keys(by).length > 1 ? f : 'of this description') + '): ' + by[f].join(' | ')));
+    } else out.push('Players the car offers: not asked (the one in use answered at the start)');
     const conf = a.conf();
     out.push('Route: source ' + a.src + ' (listed: ' + yn(a.srcListed) + ') to sink ' + a.sink + ' (listed: ' + yn(a.sinkListed) + ')' +
         (Object.keys(conf.set).length ? ' | audio.json: ' + js(conf.set) : ''));
@@ -1521,10 +1818,21 @@ Daemon.prototype.diagLines = async function () {
     d.notes.forEach((n) => out.push('Note: ' + n));
     if (d.play) {
         out.push('Last play: ' + d.play.file + ' | route ' + (d.play.route || '-') + ' | player answers: ' + yn(d.play.player) + ' | connect ' + (d.play.connect || '-') +
+            (d.play.waited ? ' (waited ' + d.play.waited + ' ms for it after connecting)' : '') +
             ' | playFile ' + (d.play.playFile || '-') + (d.play.error ? ' | ERROR ' + d.play.error : ''));
     } else out.push('Last play: none since the service started');
     const ev = Object.keys(d.events);
     out.push('Player events: ' + (ev.length ? ev.map((k) => k + ' ' + js(d.events[k])).join(' | ') : 'none yet'));
+    out.push('# Who may use them');
+    let pol;
+    try {
+        pol = someipPolicies(o.policyDirs || [], [{ name: 'CommandControl', id: d.cc && d.cc.ids ? d.cc.ids.service : null }, { name: 'MediaPlayer', id: d.mp && d.mp.ids ? d.mp.ids.service : null }]);
+    } catch (e) { pol = ['SOME/IP security: could not be read: ' + errText(e)]; }
+    pol.forEach((l) => out.push(l));
+    out.push('# How the installed apps play media');
+    // (read once, when the car does not offer the player: asked for here too, shown when done)
+    if (!this.code && d.ready && d.mp && d.mp.available === false) this.scanCode().catch(() => {});
+    this.codeLines().forEach((l) => out.push(l));
     out.push('# Files');
     let inv;
     try { inv = audioInventory(o, !(d.cc && d.cc.file && d.mp && d.mp.file)); } catch (e) { inv = ['could not be read: ' + errText(e)]; }
@@ -2199,7 +2507,7 @@ Daemon.prototype.close = async function () {
     if (this.server) this.server.close();
 };
 
-module.exports = { VERSION: VERSION, audioInventory: audioInventory, qualityHeight: qualityHeight, channelTiles: channelTiles, Daemon: Daemon, Audio: Audio, Account: Account, feedItems: feedItems, isPlayable: isPlayable, feedShelves: feedShelves, ytRequest: ytRequest, uplinkLookup: uplinkLookup, pickFetchUid: pickFetchUid, fetchRequest: fetchRequest, listCache: listCache, pruneCache: pruneCache, isReady: isReady };
+module.exports = { VERSION: VERSION, audioInventory: audioInventory, someipPolicies: someipPolicies, qualityHeight: qualityHeight, channelTiles: channelTiles, Daemon: Daemon, Audio: Audio, Account: Account, feedItems: feedItems, isPlayable: isPlayable, feedShelves: feedShelves, ytRequest: ytRequest, uplinkLookup: uplinkLookup, pickFetchUid: pickFetchUid, fetchRequest: fetchRequest, listCache: listCache, pruneCache: pruneCache, isReady: isReady };
 
 // the uplink's DNS servers (its lease): the system resolver (127.0.0.1) answers no internet names. No
 // lease (uplink down or not installed): the system resolver, as before

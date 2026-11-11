@@ -2,12 +2,13 @@
 
 RideTube, the unofficial YouTube client for BMW head units, **ported to iDrive 8 (MGU ID8)**. Based on
 [JustAnotherPU/ridetube](https://github.com/JustAnotherPU/ridetube) (iDrive 7), GPL-3.0-or-later; the port adds an
-iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.1) and Node.js 22 marked for iDrive 8.
+iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.2) and Node.js 22 marked for iDrive 8.
 
-> **Beta: runs on an iDrive 8 car, the sound not yet.** On a car, 0.4.4 draws, takes touch, searches and shows
-> thumbnails; a video stopped at "Error: audio service timed out" (the service could not bring the car's audio up).
-> 0.4.5 with service 0.4.1 looks further for what the sound needs, says why a play fails, and has
-> **Settings > Diagnostics**: if a video does not play, photograph its pages. Reports welcome in the issues.
+> **Beta: runs on an iDrive 8 car, the sound not yet.** On a car the app draws, takes touch, searches and shows
+> thumbnails, and (service 0.4.1) the car's audio manager answers and accepts the connection; the play stops because
+> that iDrive 8 does not offer the media player iDrive 7 plays OAP media with (`OapGenericMedia`). Service 0.4.2
+> asks which players the car does offer and uses one that fits; if none does, **Settings > Diagnostics** says what
+> the car has instead: photograph its pages. Reports welcome in the issues.
 
 ## Install on an iDrive 8 car
 
