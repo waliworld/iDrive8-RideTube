@@ -13,6 +13,15 @@ run on the car; nothing is downloaded for keeps: the cache holds the last few vi
   measured iDrive 7) goes in `/var/opt/jap-ridetube-d/state/audio.json`, read at each start of the service:
   `{"sourceID": n, "sinkID": n, "instance": "OapGenericMedia"}` (any of them). A MediaPlayer without the instance
   says which ones it has.
+  0.4.1, for head units that keep things elsewhere (iDrive 8): a description that is not in MainApp's folders is
+  taken from an installed app's `someipInterfaces/` (the app manager writes one there for every interface an app's
+  manifest names), then from a file with a numbered name (`...commandinterface2_CommandControl2.json`), then made
+  from the interface catalog (`/etc/oap/someip/someip-interfaces.json`) by the app manager's own generator (a module
+  of `<MainApp>/src/AppManagement/AppManagement.js`, loaded without the bundle's entry). CommandControl without an
+  instance `1` and with only one: that one. A player without `OapGenericMedia` and with one instance named like it:
+  that one. Sink 1024 not listed: the only sink, or the only one the unit's own connections use; among several
+  nothing is picked. The start is tried every 5 s until it succeeds, each proxy given 8 s a try; a play meanwhile
+  gets `error` with the reason, and `diag` has the rest.
 - video: `ytdec --dir cache/<id> --rect WxH [--fill] --log /var/opt/jap-ridetube-d/log/ytdec.log`, which
   writes `/dev/shm/mgu-video-ridetube` for mgu-render; paced by `clock <elapsed_ms> <mono_ms>` lines.
 - media: `/var/opt/jap-ridetube-d/cache/<id>/` {meta.json, thumb.rgba, audio.m4a, index.bin, video.h264, and
@@ -91,6 +100,7 @@ App → daemon:
 | `{"cmd":"auth"}` | signed in, or a code still valid: → that `auth` again; else a new device code → `auth` `code`, then polled until `signed_in`, `signed_out` (expired, denied) or `error` |
 | `{"cmd":"sign_out"}` | deletes the account → `auth` `signed_out` |
 | `{"cmd":"feed","which":"home\|subs\|wl"}` | → `feed` (items, or error `signed out` / `feed offline` / `unknown feed`) |
+| `{"cmd":"diag"}` | → `diag`: `{"ev":"diag","version","ready","lines":[..]}`, the app's Settings > Diagnostics page (lines of text, `# ` starts a section: the sound's start and what the car answered, the files, the picture, the log's last lines) |
 
 Daemon → app: `{"ev":"state","state":"idle|preparing|playing|paused|ended|error","pct","id","title","buffering"}`,
 `{"ev":"time","elapsed","total"}` (ms, ≤ 4/s), `{"ev":"results","q","items":[{id,title,channel,duration_s,meta?}]}` (`meta: ["12K views"]` when there is a view count),

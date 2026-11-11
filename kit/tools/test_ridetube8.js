@@ -4,7 +4,7 @@
 // the stubbed head unit on a 2880 x 960 renderer that routes touch, against a fake jap-ridetube-d. Checks the
 // placement (the app area under the HMI's strip, over its climate bar), the wider page (five tiles a row), the kit's
 // back button, Search through the on-screen keyboard (locked while driving, recent searches as chips), the rail's
-// Settings card (sign in / out, the settings sheet), the player and the video size asked of the daemon.
+// Settings card (sign in / out, the diagnostics pages, the settings sheet), the player and the video size asked of the daemon.
 // With SHOTS=<folder> each step is also written there as a PNG of the whole screen (kit/tools/surface.js).
 //   node kit/tools/test_ridetube8.js
 
@@ -176,6 +176,22 @@ async function main() {
     drive(0);
     await sleep(400);
     await hu.loopFn();
+    // a play the service could not start: its reason on the player (whole, not cut), and Try again plays it again
+    const why = 'the car\'s audio is not ready - this head unit has no description of the CommandControl interface (Settings > Diagnostics)';
+    d.send({ ev: 'state', state: 'error', id: items[0].id, title: items[0].title });
+    d.send({ ev: 'error', msg: why });
+    await sleep(100);
+    await hu.loopFn();
+    assert.ok(target('ov:play'), 'Try again: ' + disp.pageTargets.map((t) => t.key).join(' '));
+    const { Recorder } = require(path.join(kitDir, 'record'));
+    assert.ok(new Recorder(2080, 520, { textScale: pl.scale }).textWidth('Error: ' + why, 28, { literal: true }) < 2080 - 200, 'the longest reason fits the player\'s line');
+    snap('player-error');
+    const plays = d.cmds('play').length;
+    await tapTarget(target('ov:play'));
+    await until(() => d.cmds('play').length === plays + 1, 1000, 'Try again plays it again');
+    d.send({ ev: 'state', state: 'playing', id: items[0].id, title: items[0].title });
+    await sleep(100);
+    await hu.loopFn();
     // (the overlay may have hidden by now: a tap shows it, then its back)
     if (target('ov:back').w > 1000) { await tapTarget(target('ov:back')); await hu.loopFn(); }
     await tapTarget(target('ov:back'));
@@ -200,9 +216,63 @@ async function main() {
     await tapTarget(disp.sheetTargets.slice(1).sort((a, b) => a.x - b.x)[0]);
     await until(() => d.cmds('sign_out').length === 1, 1000, 'signed out on the second press');
     assert.ok(!disp.sheet, 'the card closed');
+    // the card's Diagnostics: the app's own lines, then the service's (asked when the page opens and on Refresh),
+    // wrapped to the page and paged
     await tapTarget(target('rail:more'));
     disp._paintSheet();
-    await tapTarget(disp.sheetTargets.slice(1).sort((a, b) => a.x - b.x)[1]);   // Settings
+    await tapTarget(disp.sheetTargets.slice(1).sort((a, b) => a.x - b.x)[1]);   // Diagnostics
+    assert.ok(disp.sheet && disp.sheet.title === 'Diagnostics', 'the diagnostics page');
+    await until(() => d.cmds('diag').length === 1, 1000, 'the service asked for its diagnostics');
+    disp._paintSheet();
+    let rows = disp.sheet.laid.rows.map((r) => r.s);
+    assert.ok(/^RideTube app \d+\.\d+\.\d+ \(iDrive 8\) \| service: connected \| player: /.test(rows[0]), rows[0]);
+    assert.ok(/^Screen: renderer connected.*2880x960, IterioDev dialect \| car: standing \(speed 0 km\/h\)$/.test(rows[1]), rows[1]);
+    assert.strictEqual(rows[2], 'Asking the RideTube service...');
+    const long = 'NOT READY - no org_genivi_am_commandinterface_CommandControl.json in /usr/lib/oap-mainapp/src-gen, /usr/lib/oap-mainapp/src-gen/someip, /usr/lib/oap-mainapp21/src-gen/someip, /usr/lib/oap-mainapp21/src-gen | stopped at: finding the CommandControl description | try 12';
+    const svc = ['RideTube service 0.4.1 | Node v8.17.0 | running 3 min | player: idle', '# Sound', long, 'SOME/IP binding: /usr/lib/someip.node',
+        'A_path_with_no_space_in_it_' + '/usr/lib/oap-mainapp21/src-gen/someip/de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json'.repeat(3)]
+        .concat(Array.from({ length: 30 }, (_, i) => 'Line ' + (i + 1) + ' of the files and the log, as the service wrote it'), ['# Log (the last lines)', '12:00:01 someip not ready: … café 中']);
+    d.send({ ev: 'diag', version: '0.4.1', ready: false, lines: svc });
+    await until(() => disp.sheet.laid && (disp._paintSheet(), disp.sheet.laid.rows.length > 20), 1000, 'the service\'s lines on the page');
+    rows = disp.sheet.laid.rows;
+    const lit = { literal: true };
+    const wide = (r) => disp.sheetRec.textWidth(r.s, 22, r.head ? { literal: true, font: 'bold' } : lit);
+    assert.ok(rows.every((r) => wide(r) <= disp.sheetRec.w - 88), 'every row fits the page: ' + JSON.stringify(rows.filter((r) => wide(r) > disp.sheetRec.w - 88)));
+    assert.ok(rows.some((r) => r.head && r.s === 'Sound'), 'a section heading');
+    assert.strictEqual(rows.map((r) => r.s.replace(/^ {4}/, '')).join(' ').indexOf(long) >= 0, true, 'a long line wraps at its spaces, nothing lost');
+    assert.ok(rows.filter((r) => /^ {4}/.test(r.s)).length >= 2, 'continuation rows are indented');
+    assert.strictEqual(rows.map((r) => r.s.replace(/^ {4}/, '')).join('').split('MediaPlayer.json').length, 4, 'a word wider than the page is cut, nothing lost');
+    assert.strictEqual(rows[rows.length - 1].s, '12:00:01 someip not ready: … café ?', 'a glyph the fonts lack is a ?');
+    assert.ok(disp.sheet.pages >= 3 && disp.sheet.page === 0, 'paged: ' + disp.sheet.pages);
+    snap('diagnostics-1');
+    // top right, from the right: Close, Next, Previous, Refresh
+    const top = () => disp.sheetTargets.slice().sort((a, b) => b.x - a.x);
+    await tapTarget(top()[2]);                     // Previous on the first page: stays
+    assert.strictEqual(disp.sheet.page, 0);
+    await tapTarget(top()[1]);                     // Next
+    disp._paintSheet();
+    assert.strictEqual(disp.sheet.page, 1);
+    snap('diagnostics-2');
+    disp.sheet.move(1); disp.sheet.move(1); disp.sheet.move(1); disp.sheet.move(1); disp.sheet.move(1);
+    disp._paintSheet();
+    assert.strictEqual(disp.sheet.page, disp.sheet.pages - 1, 'the controller turns the pages, up to the last');
+    snap('diagnostics-last');
+    await tapTarget(top()[3]);                     // Refresh
+    await until(() => d.cmds('diag').length === 2, 1000, 'Refresh asks again');
+    disp._paintSheet();
+    assert.strictEqual(disp.sheet.laid.rows[2].s, 'Asking the RideTube service...');
+    assert.strictEqual(disp.sheet.page, 0, 'fewer pages: back on the first');
+    // a service older than its diagnostics
+    d.send({ ev: 'error', msg: 'unknown cmd diag' });
+    await until(() => (disp._paintSheet(), /older than the app/.test(disp.sheet.laid.rows[2].s)), 1000, 'an older service is said');
+    assert.strictEqual(hu.model ? hu.model.error : null, null);
+    await tapTarget(top()[0]);                     // Close
+    assert.ok(!disp.sheet, 'closed');
+    console.log('ok   Settings > Diagnostics: the app\'s lines and the service\'s, wrapped, paged, refreshed');
+
+    await tapTarget(target('rail:more'));
+    disp._paintSheet();
+    await tapTarget(disp.sheetTargets.slice(1).sort((a, b) => a.x - b.x)[2]);   // Settings
     assert.ok(disp.sheet && disp.sheet.settings !== true && disp.sheet.title === 'Settings' && typeof disp.sheet.rows === 'function', 'the settings sheet');
     disp._paintSheet();
     snap('settings-list');

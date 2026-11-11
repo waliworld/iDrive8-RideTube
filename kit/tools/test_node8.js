@@ -13,6 +13,8 @@ const root = path.join(__dirname, '..', '..');
 const js = (dir) => fs.readdirSync(path.join(root, dir)).filter((f) => /\.js$/.test(f)).map((f) => path.join(dir, f));
 const files = js('kit/runtime').concat(js('kit/id8'));
 fs.readdirSync(path.join(root, 'apps')).forEach((a) => { if (fs.existsSync(path.join(root, 'apps', a, 'app.json'))) files.push(...js(path.join('apps', a))); });
+// the RideTube service runs on the unit's Node 8 as well (its unit: /usr/bin/node; thumb.js is run by jap-node22)
+if (fs.existsSync(path.join(root, 'native', 'jap-ridetube-d', 'ytd.js'))) files.push(path.join('native', 'jap-ridetube-d', 'ytd.js'));
 
 let acorn = null;
 try {

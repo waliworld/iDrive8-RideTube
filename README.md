@@ -2,13 +2,12 @@
 
 RideTube, the unofficial YouTube client for BMW head units, **ported to iDrive 8 (MGU ID8)**. Based on
 [JustAnotherPU/ridetube](https://github.com/JustAnotherPU/ridetube) (iDrive 7), GPL-3.0-or-later; the port adds an
-iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.0) and Node.js 22 marked for iDrive 8.
+iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.1) and Node.js 22 marked for iDrive 8.
 
-> **Beta: starts on an iDrive 8 car, not yet seen drawing there.** 0.4.0 to 0.4.2 did not start (the tile greyed
-> out: the wrong kind of package for iDrive 8, below). 0.4.3 started, enabled its tile and opened its page on a car,
-> and its own code did not load (it looked for the SDK on a global the car does not share). 0.4.4 fixes that; its
-> screen code has not drawn on a car yet. **If the page opens but stays grey, photograph it**: the lines on it say
-> why. Reports welcome in the issues.
+> **Beta: runs on an iDrive 8 car, the sound not yet.** On a car, 0.4.4 draws, takes touch, searches and shows
+> thumbnails; a video stopped at "Error: audio service timed out" (the service could not bring the car's audio up).
+> 0.4.5 with service 0.4.1 looks further for what the sound needs, says why a play fails, and has
+> **Settings > Diagnostics**: if a video does not play, photograph its pages. Reports welcome in the issues.
 
 ## Install on an iDrive 8 car
 
@@ -101,8 +100,9 @@ next head-unit restart.
 
 ## iDrive 8
 
-Experimental: built and tested on a computer against iDrive 8's screen (2880 x 960) and the packages of IterioDev's
-car-tested iDrive 8 apps, **not yet run on an iDrive 8 car**. Reports welcome in the issues.
+Beta: built and tested on a computer against iDrive 8's screen (2880 x 960); on a car the app, its screen, touch,
+search and thumbnails work (0.4.4), **the sound and the picture of a video are not confirmed yet**. Reports welcome
+in the issues.
 
 - Its own app, `jap_ridetube8`, from the same code: the HMI has a page of the app's (status lines only) and the GPU
   renderer draws the whole screen over the app area (under the HMI's status strip, over the climate bar). Five tiles
@@ -120,7 +120,7 @@ car-tested iDrive 8 apps, **not yet run on an iDrive 8 car**. Reports welcome in
 - Touch only (no controller gate on iDrive 8). The header's back arrow closes RideTube (a sheet over the page first).
 - Search opens RideTube's own keyboard, with your recent searches as buttons. Typing works only while parked; the
   recent searches work while driving.
-- The rail's **Settings** has the account (Sign in, Sign out pressed twice) and the settings.
+- The rail's **Settings** has the account (Sign in, Sign out pressed twice), **Diagnostics** and the settings.
 - The video is decoded as a 16:9 frame as tall as the app area (1358 x 764).
 - Needs `jap-node22` with iDrive 8 in its catalog: this repository's release has it (JustAnotherPU/mgu-apps lists it
   for iDrive 7 only, so its source alone stops the install with "needs jap-node22").
@@ -128,9 +128,12 @@ car-tested iDrive 8 apps, **not yet run on an iDrive 8 car**. Reports welcome in
 What may need a fix on the car, and how to tell (`journalctl -u jap-ridetube-d`, the app's
 `/var/opt/public/oap/oap_<uid>/data/jap_ridetube8.log`):
 
-- **The sound.** The service plays through BMW's media player as on iDrive 7 (source 1046, sink 1024). At start it
-  logs `audio sources ...; sinks ...`; if the sound does not play, write the right ids to
-  `/var/opt/jap-ridetube-d/state/audio.json` (`native/jap-ridetube-d/README.md`) and restart the service.
+- **The sound.** The service plays through BMW's media player as on iDrive 7 (the audio manager's CommandControl,
+  the MediaPlayer instance `OapGenericMedia`, source 1046, sink 1024), and looks further where an iDrive 8 keeps
+  them elsewhere (`native/jap-ridetube-d/README.md`). If a video ends with "Error: the car's audio is not ready
+  ..." or does not sound, open **Settings > Diagnostics** and photograph every page (Next): they say where the
+  start stopped, what the car has and what it answered. A route known to be right goes in
+  `/var/opt/jap-ridetube-d/state/audio.json`, then restart the service.
 - **The picture.** ytdec decodes on the Intel GPU with the head unit's Media SDK (`libmfxhw64`). The service logs at
   start whether the head unit has it. Without it the sound plays and the picture shows "video failed, audio only".
 - **The tile.** The entry module makes the tile usable as the MGU Store's app does on iDrive 8 (the name and icon

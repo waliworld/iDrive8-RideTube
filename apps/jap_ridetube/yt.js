@@ -107,6 +107,7 @@ class Model {
         this.toast = null;           // {text, until}: a skipped sponsor
         this.chans = null;           // the subscribed channels: {items:[{id,title,handle}], loading, error, t}
         this.chan = null;            // the channel page shown: {id, title, items, shelves, loading, error, t}
+        this.diag = null;            // the service's diagnostics, once asked: {lines, version, ready, t} (askDiag)
         this.rev = 0;                // bumped on every change the screens show
     }
     active() { return ACTIVE.indexOf(this.state) >= 0; }
@@ -197,6 +198,11 @@ class Model {
         } else if (m.ev === 'time') {
             if (typeof m.elapsed === 'number') this.elapsed = m.elapsed;
             if (typeof m.total === 'number') this.total = m.total;
+        } else if (m.ev === 'diag') {
+            this.diag = { lines: Array.isArray(m.lines) ? m.lines.map(String) : [], version: m.version || null, ready: m.ready, t: Date.now() };
+        } else if (m.ev === 'error' && m.msg === 'unknown cmd diag') {
+            // a service older than its Diagnostics page: say what to do, nothing is wrong with playback
+            this.diag = { lines: ['This RideTube service is older than the app and has no diagnostics.', 'Update "RideTube service" in the Store (Tools), then open this page again.'], version: null, ready: null, t: Date.now() };
         } else if (m.ev === 'error') {
             // a daemon older than the account commands: no sign-in, nothing wrong with playback
             if (/^unknown cmd (auth|auth_status|sign_out|feed)$/.test(m.msg)) { this.auth = { state: 'unsupported', code: null, url: null, msg: null }; this._changed(); return; }
@@ -229,6 +235,8 @@ class Model {
         return c ? String(c[1]) : null;
     }
     /** a stream lookup ahead of a likely play (the daemon skips cached and fresh ones) */
+    /** ask the service for its diagnostics (model.diag once it answers) */
+    askDiag() { return this.send({ cmd: 'diag' }); }
     prefetch(id) { return this.connected && this._known(id) ? this.send({ cmd: 'prefetch', id }) : false; }
     /** the screens draw item id: its thumb asked once (until it comes, or the item goes), if not held; true when asked now */
     wantThumb(id) {

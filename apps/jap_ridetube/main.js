@@ -49,7 +49,7 @@ const G = require('./kit/gauges');
 const QR = require('./kit/qr');
 const { setImage } = require('./kit/record');
 const { HMI, PAGE, ID8 } = require('./kit/display');
-const { listSheet, cardSheet } = require('./kit/sheet');
+const { listSheet, cardSheet, textSheet } = require('./kit/sheet');
 const { keyboardSheet } = require('./kit/keyboard');
 const Parked = require('./kit/parked');
 const { Ctl, Model, clock, SOCKET, FEEDS, SHELF_MAX } = require('./yt');
@@ -256,9 +256,34 @@ mgu.run({
                             return null;
                         } }
                         : { label: 'Sign in', run: () => { show('home'); model.authStart(true); return 'close'; } },
+                    { label: 'Diagnostics', run: () => { openDiag(); return null; } },
                     { label: 'Settings', primary: true, run: () => { ctx.sheet(listSheet(settings, null, { version: mgu.SPEC.version })); return null; } },
                 ],
             }));
+        }
+        // Settings > Diagnostics: what the app and its service say about this head unit, as pages of text to read or
+        // photograph (a car has no log to send). The service's part is asked when the page opens and on Refresh.
+        let diagMemo = null;
+        function diagLines() {
+            const g = ctx.display && ctx.display.gpu, dg = model.diag;
+            const key = [model.connected, dg && dg.t, model.state, model.error, parked.moving(), parked.speed() === null, g && g.ready].join('|');
+            if (diagMemo && diagMemo.key === key) return diagMemo.lines;
+            const lines = ['RideTube app ' + mgu.SPEC.version + (mgu.SPEC.hmi ? ' (' + (mgu.SPEC.hmi === 'ID8' ? 'iDrive 8' : mgu.SPEC.hmi) + ')' : '') +
+                ' | service: ' + (model.connected ? 'connected' : 'NOT RUNNING') + ' | player: ' + model.state + (model.error ? ' | last error: ' + model.error : '')];
+            lines.push('Screen: ' + (!g ? 'no GPU renderer' : (g.ready ? 'renderer connected' : 'renderer not connected') + (g.path ? ' ' + g.path : '') +
+                (g.screen ? ', ' + g.screen.w + 'x' + g.screen.h : '') + (g.native ? ', mgu-render/1' : g.iterio ? ', IterioDev dialect' : '')) +
+                ' | car: ' + (parked.moving() ? 'moving' : 'standing') + ' (speed ' + (parked.speed() === null ? 'not read' : Math.round(parked.speed()) + ' km/h') + ')');
+            if (!model.connected) lines.push('The RideTube service (jap-ridetube-d) does not answer: install or update "RideTube service" in the Store (Tools), then restart the head unit.');
+            else if (!dg) lines.push('Asking the RideTube service...');
+            else dg.lines.forEach((l) => lines.push(l));
+            diagMemo = { key, lines };
+            return lines;
+        }
+        function openDiag() {
+            model.diag = null;
+            model.askDiag();
+            ctx.sheet(textSheet({ title: 'Diagnostics', heading: 'RideTube diagnostics', lines: diagLines,
+                actions: [{ label: 'Refresh', run: () => { model.diag = null; model.askDiag(); return null; } }] }));
         }
         ui.onClick('BTN_PLAY', () => model.toggle());
         ui.onClick('BTN_RW', () => model.skip(-10000));

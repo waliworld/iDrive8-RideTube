@@ -1,5 +1,36 @@
 # Changelog
 
+## App 0.4.5, service 0.4.1: iDrive 8, "Error: audio service timed out"
+
+First run of the whole app on a car (0.4.4): it draws, touch, the keyboard, search and thumbnails work. A video
+stops at "Error: audio service timed out": the service never got the car's audio up, and said so in a journal
+nobody can read from the driver's seat.
+
+- **The service says why.** The audio start is followed step by step (the SOME/IP binding, the audio manager's and
+  the media player's descriptions, their proxies, the audio manager answering, its lists, leftover connections). A
+  play that finds it not up ends with the reason ("the car's audio is not ready - the car's audio manager
+  (CommandControl) does not answer"), not a timeout. A proxy that never starts no longer holds the start for good:
+  each try is given 8 s, and the next one joins it.
+- **Settings > Diagnostics** (the rail's Settings card): pages of text to read or photograph. The app's lines (its
+  version, the renderer, the speed signal), then the service's, asked with the new `diag` command: where the audio
+  start stopped and its last error; the descriptions found, the instance used of those each has, whether each
+  answers; the route (source, sink, whether the car lists them); the car's sources, sinks and connections; the last
+  play (what `connect` and `playFile` answered) and the player's last events; where the head unit keeps the
+  descriptions (MainApp's folders, the installed apps' `someipInterfaces/`, the interface catalog, the app manager's
+  generator, and a bounded search for them elsewhere when one is missing); the video decoder; the log's last lines.
+- **It looks further for what iDrive 7 has in one place.** The two descriptions: MainApp's folders as before, then an
+  installed app's `someipInterfaces/`, then a numbered name (`...mediaplayer2_MediaPlayer2.json`, as iDrive 8 numbers
+  its HMI's interfaces), then made from the unit's interface catalog by the app manager's own generator. The
+  instance: CommandControl's only one where it has no `1`; the player's only one named like the generic OAP media
+  player where it has no `OapGenericMedia`. The sink: where 1024 is not on the unit, the only sink, or the only one
+  the car's own connections use; among several nothing is picked. Each of these is logged and shown on the page.
+  `state/audio.json` still wins. A head unit that has everything where iDrive 7 has it starts as before.
+- A `connect` or `playFile` the binding rejects with something that is no Error says which call failed, and a
+  player whose instance is not offered is named in the error.
+- The kit has `textSheet` (pages of wrapped plain text). `kit/tools/test_node8.js` also checks the service.
+
+Nobody has heard this play on an iDrive 8 yet: if a video still does not play, the Diagnostics pages are the report.
+
 ## App 0.4.4: iDrive 8, the page opened but the app's code did not load
 
 First run past the tile on a car (0.4.3): the page opened and said "RideTube - did not load ... the kit was loaded

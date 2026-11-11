@@ -13,6 +13,7 @@
  *
  *   listSheet(settings)     the app's settings: a row per setting, a list of values to pick from
  *   cardSheet(spec)         a card: title, rows of label and value, action buttons
+ *   textSheet(spec)         pages of plain text (an app's diagnostics, to be read or photographed)
  *   list(), pill()          the settings' scrolling rows and round buttons, for an app's own sheets
  */
 const { withAlpha } = require('./canvas');
@@ -248,4 +249,98 @@ function cardSheet(spec) {
     return sh;
 }
 
-module.exports = { listSheet, cardSheet, list, pill, TOP };
+/* ---------------- text ---------------- */
+const LIT = { literal: true };
+/** s in rows no wider than w: broken at spaces; a word wider than the row (a path) where it stops fitting. Rows after the first are indented. */
+function wrap(r, s, size, w, opts) {
+    const out = [], IND = '    ';
+    let line = '';
+    const fits = (x) => r.textWidth((out.length ? IND : '') + x, size, opts) <= w;
+    String(s).split(' ').forEach((word) => {
+        let wd = word;
+        for (;;) {
+            const tried = line ? line + ' ' + wd : wd;
+            if (fits(tried)) { line = tried; return; }
+            if (line) { out.push((out.length ? IND : '') + line); line = ''; continue; }
+            let n = wd.length;
+            while (n > 1 && !fits(wd.slice(0, n))) n--;
+            out.push((out.length ? IND : '') + wd.slice(0, n));
+            wd = wd.slice(n);
+            if (!wd) return;
+        }
+    });
+    if (line || !out.length) out.push((out.length ? IND : '') + line);
+    return out;
+}
+/**
+ * spec: { title, heading, lines, actions: [{ label, run }] } - lines (an array, or a function read on each frame: the
+ * same array while nothing changed, the pages are laid out again only for a new one) of plain text, shown as
+ * written (not translated), wrapped to the page and paged. A line that starts with '# ' is a section's heading.
+ * Previous / Next / Close on top, the actions before them; the controller turns the pages, its press goes to the
+ * next page and closes on the last.
+ */
+function textSheet(spec) {
+    const get = (k) => (typeof spec[k] === 'function' ? spec[k]() : spec[k]);
+    const SIZE = 22, LH = 30, X = 44;
+    const sh = {
+        title: spec.title || '',
+        page: 0, pages: 1, controller: false, onClose: null,
+        laid: null,                                   // { of: the lines laid out, w, n: rows a page, rows: [{ s, head }] }
+        layout(r, W, n) {
+            const lines = get('lines') || [];
+            const L = this.laid;
+            if (L && L.of === lines && L.len === lines.length && L.w === W && L.n === n) return L.rows;
+            const rows = [];
+            lines.forEach((l) => {
+                // (the fonts have Latin and a few signs, kit/tools/bake_fonts.py: anything else would be dropped glyph by glyph)
+                const text = String(l).replace(/[^\x20-\x7e\xa0-ſ–—‘-‚“-„•…‹›€]/g, '?');
+                const head = text.indexOf('# ') === 0;
+                wrap(r, head ? text.slice(2) : text, SIZE, W - 2 * X, head ? { literal: true, font: 'bold' } : LIT).forEach((row) => rows.push({ s: row, head }));
+            });
+            this.laid = { of: lines, len: lines.length, w: W, n, rows };
+            return rows;
+        },
+        draw(r, t) {
+            r.clear(t.bg);
+            const W = r.w || PAGE_W, bottom = BOTTOM + (r.extra || 0), y0 = TOP + 84, targets = [];
+            const n = Math.max(1, Math.floor((bottom - y0) / LH));
+            const rows = this.layout(r, W, n);
+            this.pages = Math.max(1, Math.ceil(rows.length / n));
+            this.page = Math.max(0, Math.min(this.page, this.pages - 1));
+            const accent = t.sel || t.accent;
+            r.text(get('heading') || this.title, X, TOP + 44, 30, t.text, { literal: true, font: 'bold' });
+            // top right, from the right: Close, Next, Previous, the actions
+            let x = W - 40;
+            const btn = (label, w, on, act, dim) => {
+                x -= w;
+                pill(r, t, x, TOP + 8, w, 46, label, on, dim ? { color: withAlpha('#ffffff', 0.35) } : null);
+                targets.push({ x: x - 8, y: TOP + 2, w: w + 16, h: 58, act });
+                x -= 16;
+            };
+            btn('Close', 150, false, () => 'close');
+            btn('Next', 150, this.page < this.pages - 1, () => { this.page = Math.min(this.pages - 1, this.page + 1); return null; }, this.page >= this.pages - 1);
+            btn('Previous', 170, false, () => { this.page = Math.max(0, this.page - 1); return null; }, this.page <= 0);
+            (get('actions') || []).forEach((a) => btn(a.label, Math.max(170, r.textWidth(a.label, 24, { font: 'bold' }) + 70), false, () => a.run && a.run()));
+            r.text('Page ' + (this.page + 1) + ' of ' + this.pages, x - 8, TOP + 40, 24, t.dim, { literal: true, align: 'right' });
+            rows.slice(this.page * n, this.page * n + n).forEach((row, i) => {
+                r.text(row.s, X, y0 + i * LH + SIZE, SIZE, row.head ? accent : t.text, row.head ? { literal: true, font: 'bold' } : LIT);
+            });
+            return targets;
+        },
+        move(d) {
+            this.controller = true;
+            this.page = Math.max(0, Math.min(this.pages - 1, this.page + (d > 0 ? 1 : -1)));
+        },
+        press() {
+            this.controller = true;
+            if (this.page >= this.pages - 1) return 'close';
+            this.page++;
+            return null;
+        },
+        back() { return 'close'; },
+        top() { return true; },
+    };
+    return sh;
+}
+
+module.exports = { listSheet, cardSheet, textSheet, wrap, list, pill, TOP };

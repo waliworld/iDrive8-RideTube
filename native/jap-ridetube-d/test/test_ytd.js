@@ -1303,6 +1303,296 @@ async function main() {
         assert.ok(lines.some((l) => /^source 1046 is not listed on this head unit; set "sourceID" in /.test(l)), lines.join('|'));
     });
 
+    // ---- 0.4.1: the audio start says where it stops, finds its descriptions elsewhere, and the Diagnostics page
+    const H = { time() {}, state() {}, error() {} };
+    const mkRoot = (name) => { const r = path.join(tmp, name); fs.mkdirSync(r, { recursive: true }); return r; };
+
+    await t('the version is component.json\'s', async () => {
+        assert.strictEqual(require('../ytd.js').VERSION, JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'component.json'), 'utf8')).version);
+    });
+
+    await t('diag: the page\'s lines - the sound ready, the route, the car\'s lists, the files, the log', async () => {
+        c.clear();
+        c.send({ cmd: 'diag' });
+        const m = await c.waitFor((x) => x.ev === 'diag');
+        const all = m.lines.join('\n');
+        assert.strictEqual(m.ready, true);
+        assert.ok(/^RideTube service \d+\.\d+\.\d+ \| Node v/.test(m.lines[0]), m.lines[0]);
+        assert.ok(/# Sound\nReady: /.test(all), all);
+        assert.ok(all.indexOf('CommandControl: description ' + path.join(srcGen, 'org_genivi_am_commandinterface_CommandControl.json') + ' | instance 1 (the description lists none) | answers: yes') >= 0, all);
+        assert.ok(/Route: source 1046 \(listed: yes\) to sink 1024 \(listed: yes\)/.test(all), all);
+        assert.ok(/Sources: 1046:OapGenericMedia 129:Tuner\nSinks: 1024:AMP\nConnections \(id:source>sink\): /.test(all), all);
+        assert.ok(all.indexOf(srcGen + ': 2 descriptions, CommandControl yes, MediaPlayer yes') >= 0, all);
+        assert.ok(/# Log \(the last lines\)\n\d\d:\d\d:\d\d /.test(all), all);
+        SECRETS.forEach((x) => assert.ok(all.indexOf(x) < 0, x + ' on the page'));
+    });
+
+    await t('no description anywhere: both are looked for, the start says which is missing, the player gets a reason', async () => {
+        const root = mkRoot('nodesc');
+        const a = new Audio({ someip: someip, srcGens: [path.join(root, 'a'), path.join(root, 'b')], oapRoot: path.join(root, 'oap'), catalogs: [path.join(root, 'cat.json')], generators: [],
+            audioConf: path.join(root, 'audio.json'), availWaitMs: 200, log() {} }, H);
+        await assert.rejects(a.start(), /^Error: no org_genivi_am_commandinterface_CommandControl\.json in /);
+        assert.strictEqual(a.diag.stage, 'finding the CommandControl description');
+        assert.ok(/^no org_genivi_am_commandinterface_CommandControl\.json in /.test(a.diag.cc.error) && /^no de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer\.json in /.test(a.diag.mp.error));
+        assert.strictEqual(a.diag.cc.generator, 'no interface catalog (' + path.join(root, 'cat.json') + ')');
+        assert.strictEqual(a.why(), 'the car\'s audio is not ready - this head unit has no description of the CommandControl interface (Settings > Diagnostics)');
+        assert.strictEqual(a.diag.ready, false);
+        assert.strictEqual(a.diag.tries, 1);
+    });
+
+    await t('the page\'s files: MainApp\'s folders, the apps\' descriptions, the catalog, the generator, and a search for them elsewhere when one is missing', async () => {
+        const { audioInventory } = require('../ytd.js');
+        const root = mkRoot('inv'), gen = path.join(root, 'usr/lib/oap-mainapp21/src-gen/someip'), oap = path.join(root, 'oap');
+        fs.mkdirSync(gen, { recursive: true });
+        ['de_bmw_infotainment_hmi_remote2_RemoteHmiApplication2', 'de_bmw_infotainment_entertainment_tuner_Tuner', 'org_genivi_am_commandinterface_CommandControl', 'de_bmw_infotainment_vehicle_Vehicle2']
+            .forEach((n) => fs.writeFileSync(path.join(gen, n + '.json'), '{}'));
+        fs.mkdirSync(path.join(oap, 'oap_13007', 'someipInterfaces'), { recursive: true });
+        fs.writeFileSync(path.join(oap, 'oap_13007', 'someipInterfaces', 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json'), JSON.stringify({ instances: { OapGenericMedia: {}, Usb: {} } }));
+        fs.mkdirSync(path.join(oap, 'oap_13008', 'someipInterfaces'), { recursive: true });
+        fs.mkdirSync(path.join(root, 'etc/oap/someip'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'etc/oap/someip/someip-interfaces.json'), JSON.stringify({ interfaces: { 'org.genivi.am.commandinterface.CommandControl': {}, 'de.bmw.infotainment.entertainment.mediaplayer2.MediaPlayer2': {}, 'de.bmw.infotainment.vehicle.Vehicle2': {} } }));
+        fs.mkdirSync(path.join(root, 'usr/lib/oap-mainapp21/src/AppManagement'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'usr/lib/oap-mainapp21/src/AppManagement/AppManagement.js'), '({"someip-interfaces-generator/IFConfigGenerator":3})');
+        fs.mkdirSync(path.join(root, 'usr/share/franca/deep/node_modules'), { recursive: true });
+        fs.writeFileSync(path.join(root, 'usr/share/franca/deep/MediaPlayer2.json'), '{}');
+        fs.writeFileSync(path.join(root, 'usr/share/franca/deep/node_modules/MediaPlayer.json'), '{}');
+        const o = { srcGens: [path.join(root, 'usr/lib/oap-mainapp/src-gen'), gen], oapRoot: oap, catalogs: [path.join(root, 'etc/oap/someip/someip-interfaces.json')],
+            generators: [path.join(root, 'usr/lib/oap-mainapp21/src/AppManagement/AppManagement.js'), path.join(root, 'usr/lib/oap-mainapp21/src/AppManagement/AppManagement.bundle.js')],
+            mainapps: [{ root: path.join(root, 'usr/lib/oap-mainapp'), hmi: 'HmiMain3D' }, { root: path.join(root, 'usr/lib/oap-mainapp21'), hmi: 'Hmi8' }], searchRoots: [path.join(root, 'usr'), path.join(root, 'etc')] };
+        const rel = (l) => l.map((x) => x.split(root).join(''));
+        assert.deepStrictEqual(rel(audioInventory(o, true)), [
+            'App manager /usr/lib/oap-mainapp21 (Hmi8); src-gen has: someip',
+            '/usr/lib/oap-mainapp/src-gen: not there',
+            '/usr/lib/oap-mainapp21/src-gen/someip: 4 descriptions, CommandControl yes, MediaPlayer NO; of the audio: org_genivi_am_commandinterface_CommandControl, entertainment_tuner_Tuner',
+            'Installed apps: 2; with a description of the audio manager or the player: oap_13007 entertainment_mediaplayer_MediaPlayer [OapGenericMedia, Usb]',
+            'Interface catalog /etc/oap/someip/someip-interfaces.json: 3 interfaces, CommandControl yes, MediaPlayer NO; others of the audio: entertainment.mediaplayer2.MediaPlayer2',
+            'Generator /usr/lib/oap-mainapp21/src/AppManagement/AppManagement.js: has the interface generator',
+            'Elsewhere under /usr, /etc: /usr/share/franca/deep/MediaPlayer2.json']);
+        // nothing asked to be searched: no walk; no catalog: what the nearest folder above holds
+        fs.unlinkSync(path.join(root, 'etc/oap/someip/someip-interfaces.json'));
+        fs.rmdirSync(path.join(root, 'etc/oap/someip'));
+        fs.writeFileSync(path.join(root, 'etc/oap/base.json'), '{}');
+        const l2 = rel(audioInventory(o, false));
+        assert.ok(l2.indexOf('Interface catalog /etc/oap/someip/someip-interfaces.json: not there (/etc/oap has: base.json)') >= 0, l2.join('\n'));
+        assert.ok(!l2.some((x) => /^Elsewhere/.test(x)));
+    });
+
+    await t('descriptions only in an installed app\'s someipInterfaces, or under a numbered name: used, and said', async () => {
+        const root = mkRoot('apps'), oap = path.join(root, 'oap'), gen = path.join(root, 'src-gen', 'someip');
+        fs.mkdirSync(gen, { recursive: true });
+        // two apps have the player's: the one with the instance wanted wins over the one with more instances
+        fs.mkdirSync(path.join(oap, 'oap_13001', 'someipInterfaces'), { recursive: true });
+        fs.mkdirSync(path.join(oap, 'oap_13002', 'someipInterfaces'), { recursive: true });
+        fs.mkdirSync(path.join(oap, 'not_an_app', 'someipInterfaces'), { recursive: true });
+        fs.writeFileSync(path.join(oap, 'oap_13001', 'someipInterfaces', 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json'), JSON.stringify({ name: 'mpA', instances: { Usb: {}, Bt: {}, Ipod: {} } }));
+        fs.writeFileSync(path.join(oap, 'oap_13002', 'someipInterfaces', 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json'), JSON.stringify({ name: 'mpB', instances: { OapGenericMedia: {} } }));
+        fs.writeFileSync(path.join(oap, 'not_an_app', 'someipInterfaces', 'org_genivi_am_commandinterface_CommandControl.json'), JSON.stringify({ name: 'wrong' }));
+        // the audio manager's under a numbered name in MainApp's folder, with one instance that is not '1'
+        fs.writeFileSync(path.join(gen, 'org_genivi_am_commandinterface2_CommandControl2.json'), JSON.stringify({ name: 'cc2', instances: { AM: {} }, methods: { connect: {}, disconnect: {} }, fields: { listOfMainConnections: {} } }));
+        fs.writeFileSync(path.join(gen, 'org_genivi_am_commandinterface_CommandControlTypes.json'), JSON.stringify({ name: 'types' }));
+        const lines = [], built = [];
+        const sip = { buildProxy: async (cfg, inst) => { built.push([cfg.name, inst]); return someip.buildProxy(cfg, inst); } };
+        const a = new Audio({ someip: sip, srcGens: [gen], oapRoot: oap, catalogs: [], generators: [], audioConf: path.join(root, 'audio.json'), availWaitMs: 200, log: (m) => lines.push(m) }, H);
+        await a.start();
+        assert.deepStrictEqual(built, [['cc2', 'AM'], ['mpB', 'OapGenericMedia']]);
+        assert.ok(lines.some((l) => l === 'the CommandControl description is not in MainApp\'s folders: using ' + path.join(gen, 'org_genivi_am_commandinterface2_CommandControl2.json')), lines.join('|'));
+        assert.ok(lines.some((l) => l === 'CommandControl has no instance 1 on this head unit: using AM (it has AM)'), lines.join('|'));
+        assert.ok(lines.some((l) => l === 'the MediaPlayer description is not in MainApp\'s folders: using ' + path.join(oap, 'oap_13002', 'someipInterfaces', 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json')), lines.join('|'));
+        assert.deepStrictEqual(a.diag.cc.lacks, ['listOfMainSources', 'listOfMainSinks']);
+        assert.strictEqual(a.diag.mp.lacks, null);
+        assert.strictEqual(a.diag.ready, true);
+        assert.strictEqual(a.diag.stage, 'ready');
+    });
+
+    await t('the player\'s instance: the only one named like the generic OAP one is used; several, or none like it: an error naming them', async () => {
+        const root = mkRoot('inst');
+        const mk = (insts, lines) => {
+            fs.writeFileSync(path.join(root, 'org_genivi_am_commandinterface_CommandControl.json'), JSON.stringify({ name: 'cc' }));
+            fs.writeFileSync(path.join(root, 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json'), JSON.stringify({ name: 'mp', instances: insts }));
+            return new Audio({ someip: someip, srcGen: root, audioConf: path.join(root, 'audio.json'), availWaitMs: 200, log: (m) => lines.push(m) }, H);
+        };
+        let lines = [];
+        let a = mk({ Usb: {}, OapGenericMedia_2: {} }, lines);
+        await a.init();
+        assert.strictEqual(a.diag.mp.instance, 'OapGenericMedia_2');
+        assert.ok(lines.some((l) => l === 'MediaPlayer has no instance OapGenericMedia on this head unit: using OapGenericMedia_2 (it has Usb, OapGenericMedia_2)'), lines.join('|'));
+        // (an array of names is read as well)
+        a = mk(['Usb', 'OnlineOapPlayer'], lines = []);
+        await a.init();
+        assert.strictEqual(a.diag.mp.instance, 'OnlineOapPlayer');
+        a = mk({ Usb: {}, Bt: {} }, lines = []);
+        await assert.rejects(a.init(), /^Error: MediaPlayer has no instance OapGenericMedia \(it has Usb, Bt; set "instance" in /);
+        assert.strictEqual(a.why(), 'the car\'s audio is not ready - the car\'s MediaPlayer has no instance OapGenericMedia (Settings > Diagnostics)');
+        assert.strictEqual(a.diag.mp.file, path.join(root, 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json'));
+        assert.deepStrictEqual(a.diag.mp.instances, ['Usb', 'Bt']);
+        a = mk({ OapGenericMediaA: {}, OapGenericMediaB: {} }, lines = []);
+        await assert.rejects(a.init(), /MediaPlayer has no instance OapGenericMedia \(it has OapGenericMediaA, OapGenericMediaB;/);
+    });
+
+    await t('a description made from the unit\'s interface catalog by the app manager\'s generator; a catalog without it, a bundle without one: said', async () => {
+        const root = mkRoot('gen'), cat = path.join(root, 'someip-interfaces.json'), bundle = path.join(root, 'AppManagement.js');
+        const CC = 'org.genivi.am.commandinterface.CommandControl', MP = 'de.bmw.infotainment.entertainment.mediaplayer.MediaPlayer';
+        fs.writeFileSync(cat, JSON.stringify({ interfaces: { [CC]: { n: 'cc' }, [MP]: { n: 'mp' } } }));
+        // a browserify bundle shaped like MainApp's: a module table, the generator among it, an entry that must not run
+        const table = '{1:[function(require,module,exports){global.__entryRan=true;},{}],' +
+            '7:[function(require,module,exports){module.exports={generate:function(db,m){var o={};Object.keys(m.proxies).forEach(function(id){o[id]={name:"gen-"+db.interfaces[id].n,instances:{"1":{},OapGenericMedia:{}}};});return o;}};},{}]}';
+        const text = '(function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){throw new Error("no module "+i)}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){return o(e[i][1][r]||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u=0;u<t.length;u++)o(t[u]);return o}return r})()(' +
+            table.replace('7:[', '7:[').replace(/^\{/, '{') + ',{},[1]);\n';
+        fs.writeFileSync(bundle, text.replace('},{}]}', '},{"someip-interfaces-generator/IFConfigGenerator":7}]}'));
+        const lines = [], built = [];
+        const sip = { buildProxy: async (cfg, inst) => { built.push([cfg.name, inst]); return someip.buildProxy(cfg, inst); } };
+        const mk = (o) => new Audio(Object.assign({ someip: sip, srcGens: [path.join(root, 'none')], oapRoot: path.join(root, 'none'), catalogs: [path.join(root, 'absent.json'), cat],
+            generators: [path.join(root, 'absent.js'), bundle], audioConf: path.join(root, 'audio.json'), availWaitMs: 200, log: (m) => lines.push(m) }, o), H);
+        let a = mk({});
+        await a.start();
+        assert.deepStrictEqual(built, [['gen-cc', '1'], ['gen-mp', 'OapGenericMedia']]);
+        assert.ok(!global.__entryRan, 'the bundle\'s entry ran');
+        assert.strictEqual(a.diag.cc.file, cat + ' (generator of ' + bundle + ')');
+        assert.ok(lines.some((l) => l === 'the description of ' + MP + ' was made from ' + cat + ' (generator of ' + bundle + ')'), lines.join('|'));
+        // the catalog has no such interface
+        fs.writeFileSync(cat, JSON.stringify({ interfaces: { [CC]: { n: 'cc' } } }));
+        a = mk({});
+        await assert.rejects(a.start(), /no de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer\.json in /);
+        assert.strictEqual(a.diag.mp.generator, cat + ' has no ' + MP);
+        assert.strictEqual(a.diag.stage, 'finding the MediaPlayer description');
+        assert.strictEqual(a.diag.cc.error, null);
+        // a bundle this service cannot take the generator from, and one whose generator throws
+        fs.writeFileSync(cat, JSON.stringify({ interfaces: { [CC]: { n: 'cc' }, [MP]: { n: 'mp' } } }));
+        fs.writeFileSync(bundle, 'module.exports = require("./bytecode-loader")("AppManagement.jsc");\n');
+        a = mk({});
+        await assert.rejects(a.start(), /no org_genivi_am_commandinterface_CommandControl\.json in /);
+        assert.strictEqual(a.diag.cc.generator, bundle + ' has no generator this service can load');
+        fs.writeFileSync(bundle, text.replace('},{}]}', '},{"someip-interfaces-generator/IFConfigGenerator.js":9}]}'));
+        a = mk({});
+        await assert.rejects(a.start(), /no org_genivi_am_commandinterface_CommandControl\.json in /);
+        assert.ok(/^the generator failed: no module 9$/.test(a.diag.cc.generator), a.diag.cc.generator);
+    });
+
+    await t('the sink: 1024 not on the unit - the only sink, or the only one its connections use, is used; among several nothing is picked', async () => {
+        const mkSip = (sinks, cs) => ({ buildProxy: async (cfg, inst) => Object.assign(await someip.buildProxy(cfg, inst), {
+            getValue: async (n) => (n === 'listOfMainSources' ? [{ sourceID: 1046, name: 'OapGenericMedia' }] : n === 'listOfMainSinks' ? sinks : cs) }) });
+        const run = async (sinks, cs, conf) => {
+            const lines = [], f = path.join(tmp, 'sink.json');
+            if (conf) fs.writeFileSync(f, JSON.stringify(conf)); else try { fs.unlinkSync(f); } catch (e) { /* none */ }
+            const a = new Audio({ someip: mkSip(sinks, cs), srcGen: srcGen, audioConf: f, availWaitMs: 200, log: (m) => lines.push(m) }, H);
+            await a.start();
+            return { a: a, lines: lines };
+        };
+        let r = await run([{ sinkID: 5, name: 'Cabin' }], []);
+        assert.strictEqual(r.a.sink, 5);
+        assert.ok(r.lines.some((l) => l === 'sink 1024 is not on this head unit: using 5 (Cabin), the only sink'), r.lines.join('|'));
+        calls.length = 0;
+        await r.a.playNow('/x/audio.m4a');
+        assert.deepStrictEqual(called('connect')[0].a, { sourceID: 1046, sinkID: 5 });
+        assert.strictEqual(r.a.diag.play.route, '1046>5');
+        assert.strictEqual(r.a.diag.play.error, null);
+        await r.a.release();
+        r = await run([{ sinkID: 5, name: 'Cabin' }, { sinkID: 6, name: 'Phone' }], [{ mainConnectionID: 1, sourceID: 129, sinkID: 5 }, { mainConnectionID: 2, sourceID: 130, sinkID: 5 }, { mainConnectionID: 3, sourceID: 131, sinkID: 77 }]);
+        assert.strictEqual(r.a.sink, 5);
+        assert.ok(r.lines.some((l) => l === 'sink 1024 is not on this head unit: using 5 (Cabin), the sink its own connections use'), r.lines.join('|'));
+        r = await run([{ sinkID: 5, name: 'Cabin' }, { sinkID: 6, name: 'Phone' }], [{ mainConnectionID: 1, sourceID: 129, sinkID: 5 }, { mainConnectionID: 2, sourceID: 130, sinkID: 6 }]);
+        assert.strictEqual(r.a.sink, 1024);
+        assert.strictEqual(r.a.sinkListed, false);
+        assert.ok(r.lines.some((l) => /^sink 1024 is not listed on this head unit; set "sinkID" in /.test(l)), r.lines.join('|'));
+        // audio.json names one: it is used as written, listed or not
+        r = await run([{ sinkID: 5, name: 'Cabin' }], [], { sinkID: 1999 });
+        assert.strictEqual(r.a.sink, 1999);
+        // the measured unit: 1024 listed, nothing changes
+        r = await run([{ sinkID: 1024, name: 'AMP' }, { sinkID: 5, name: 'Cabin' }], []);
+        assert.strictEqual(r.a.sink, 1024);
+        assert.strictEqual(r.a.diag.notes.length, 0);
+    });
+
+    await t('a proxy that never starts: the try ends with its name after stageMs, the next try joins it (built once); the audio manager silent: said', async () => {
+        let builds = 0, release = null;
+        const hang = { buildProxy: async (cfg, inst) => { builds++; const px = await someip.buildProxy(cfg, inst); if (cfg.name.indexOf('CommandControl') >= 0) px.init = () => new Promise((r) => { release = r; }); return px; } };
+        let a = new Audio({ someip: hang, srcGen: srcGen, audioConf: path.join(tmp, 'none.json'), availWaitMs: 200, stageMs: 120, log() {} }, H);
+        await assert.rejects(a.start(), /^Error: starting the CommandControl proxy timed out$/);
+        assert.strictEqual(a.diag.stage, 'starting the CommandControl proxy');
+        assert.strictEqual(a.why(), 'the car\'s audio is not ready - the car\'s CommandControl does not start (Settings > Diagnostics)');
+        await assert.rejects(a.start(), /starting the CommandControl proxy timed out/);
+        assert.strictEqual(builds, 1);
+        release();
+        await a.start();
+        assert.strictEqual(builds, 2);       // (the player's)
+        assert.strictEqual(a.diag.tries, 3);
+        assert.strictEqual(a.diag.ready, true);
+        // a proxy whose build fails is built again
+        builds = 0;
+        const fail = { buildProxy: async (cfg, inst) => { if (++builds === 1) throw new Error('no such service'); return someip.buildProxy(cfg, inst); } };
+        a = new Audio({ someip: fail, srcGen: srcGen, audioConf: path.join(tmp, 'none.json'), availWaitMs: 200, log() {} }, H);
+        await assert.rejects(a.start(), /^Error: no such service$/);
+        await a.start();
+        // the audio manager does not answer
+        const silent = { buildProxy: async (cfg, inst) => Object.assign(await someip.buildProxy(cfg, inst), { isAvailable: async () => false, getValue: async () => { throw new Error('not available'); } }) };
+        a = new Audio({ someip: silent, srcGen: srcGen, audioConf: path.join(tmp, 'none.json'), availWaitMs: 150, log() {} }, H);
+        await assert.rejects(a.start(), /^Error: CommandControl not available$/);
+        assert.strictEqual(a.diag.stage, 'waiting for the audio manager (CommandControl) to answer');
+        assert.strictEqual(a.why(), 'the car\'s audio is not ready - the car\'s audio manager (CommandControl) does not answer (Settings > Diagnostics)');
+        await a.refresh();
+        assert.strictEqual(a.diag.cc.available, false);
+        assert.strictEqual(a.diag.sources, null);
+    });
+
+    await t('a play the car refuses: the answer is kept for the page; a rejection that is no Error says which call; a player not offered is named', async () => {
+        const mkSip = (over) => ({ buildProxy: async (cfg, inst) => Object.assign(await someip.buildProxy(cfg, inst), over(cfg)) });
+        const mk = (over) => new Audio({ someip: mkSip(over), srcGen: srcGen, audioConf: path.join(tmp, 'none.json'), availWaitMs: 200, log() {} }, H);
+        let a = mk(() => ({ callMethod: async (m) => (m === 'connect' ? { amError: 'E_NON_EXISTENT' } : { EntError: 'OK' }) }));
+        await a.start();
+        await assert.rejects(a.playNow('/x/audio.m4a'), /^Error: audio connect: E_NON_EXISTENT$/);
+        assert.strictEqual(a.diag.play.connect, '{"amError":"E_NON_EXISTENT"}');
+        assert.strictEqual(a.diag.play.error, 'audio connect: E_NON_EXISTENT');
+        a = mk(() => ({ callMethod: (m) => (m === 'connect' ? Promise.reject({ code: 7 }) : Promise.resolve({ EntError: 'OK' })) }));    // eslint-disable-line prefer-promise-reject-errors
+        await a.start();
+        await assert.rejects(a.playNow('/x/audio.m4a'), /^Error: audio connect failed: \{"code":7\}$/);
+        a = mk((cfg) => (cfg.name.indexOf('MediaPlayer') >= 0 ? { isAvailable: async () => false, callMethod: async () => { throw new Error('call timed out'); } } : {}));
+        await a.start();
+        await assert.rejects(a.playNow('/x/audio.m4a'), /^Error: call timed out \(the car's MediaPlayer "OapGenericMedia" is not available\)$/);
+        assert.strictEqual(a.diag.play.player, false);
+        await a.release();
+    });
+
+    await t('a daemon whose audio never comes up: a play ends with the reason (not "audio service timed out"), diag says NOT READY, the start goes on trying', async () => {
+        const silent = { buildProxy: async (cfg, inst) => Object.assign(await someip.buildProxy(cfg, inst), { isAvailable: async () => false }) };
+        const lg = [];
+        const d4 = new Daemon({ someip: silent, srcGen: srcGen, ytdec: fakeYtdec, cacheDir: cache, logDir: tmp, sock: path.join(tmp, 'ctl4.sock'), stateDir: path.join(tmp, 'st4'),
+            noSetuid: true, spare: false, resume: false, fetchRetryMs: [], noHwCheck: true, accountFile: path.join(tmp, 'acct4.json'), ytRequest: fakeYt,
+            availWaitMs: 60, audioRetryMs: 40, audioWaitMs: 300, log: (m) => lg.push(m) });
+        d4.start().catch((e) => lg.push('start: ' + e));
+        await waitUntil(() => fs.existsSync(path.join(tmp, 'ctl4.sock')));
+        const c4 = await client(path.join(tmp, 'ctl4.sock'));
+        mkVideo('AudioDown01');
+        c4.send({ cmd: 'play', id: 'AudioDown01', rect: '100x100' });
+        const e = await c4.waitFor((x) => x.ev === 'error', 4000);
+        assert.strictEqual(e.msg, 'the car\'s audio is not ready - the car\'s audio manager (CommandControl) does not answer (Settings > Diagnostics)');
+        await c4.waitFor((x) => x.ev === 'state' && x.state === 'error');
+        c4.send({ cmd: 'diag' });
+        const m = await c4.waitFor((x) => x.ev === 'diag');
+        assert.strictEqual(m.ready, false);
+        assert.ok(m.lines.some((l) => /^NOT READY - CommandControl not available \| stopped at: .* \| try \d+$/.test(l)), m.lines.join('\n'));
+        assert.ok(m.lines.some((l) => /^CommandControl: description .* \| answers: NO$/.test(l)), m.lines.join('\n'));
+        assert.ok(m.lines.some((l) => /someip not ready: CommandControl not available$/.test(l)), m.lines.join('\n'));
+        assert.strictEqual(lg.filter((l) => /someip not ready/.test(l)).length, 1, 'the same reason is logged once (and once a minute)');
+        const tries = d4.audio.diag.tries;
+        await waitUntil(() => d4.audio.diag.tries > tries + 1);
+        // past the first minute's tries the start waits six times as long; a play makes the next try at once
+        await waitUntil(() => d4.audio.diag.tries >= 14, 6000);
+        const at = d4.audio.diag.tries;
+        await sleep(130);
+        assert.ok(d4.audio.diag.tries <= at + 1, 'slower after 12 tries: ' + (d4.audio.diag.tries - at));
+        c4.clear();
+        const before = d4.audio.diag.tries;
+        c4.send({ cmd: 'play', id: 'AudioDown01', rect: '100x100' });
+        await c4.waitFor((x) => x.ev === 'error', 4000);
+        assert.ok(d4.audio.diag.tries > before, 'a play asks for a try at once');
+        c4.destroy();
+        await d4.close();
+        const after = d4.audio.diag.tries;
+        await sleep(200);
+        assert.ok(d4.audio.diag.tries <= after + 1, 'the start stops trying once closed');
+        fs.rmSync(path.join(cache, 'AudioDown01'), { recursive: true, force: true });
+    });
+
     c.destroy();
     await d.close();
     console.log(results.join('\n'));
