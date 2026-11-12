@@ -57,6 +57,7 @@ node kit/tools/test_ridetube8.js >/dev/null
 # the source package built with the Store's own linker, as on the head unit, and started against a fake iDrive 8
 MGU_STORE="$MGU_STORE" node kit/tools/test_mgu8.js | tail -1 | grep -q '^mgu8: all ok$' || { echo "release_id8.sh: kit/tools/test_mgu8.js did not pass (or was skipped)" >&2; exit 1; }
 (cd "$d" && node test/test_ytd.js >/dev/null && node test/test_thumb.js >/dev/null)
+node tools/test_id8_collect.js >/dev/null
 
 node "$MGU_STORE/deploy/hu" artifact "$d" --out "$d/dist"
 node "$MGU_STORE/deploy/hu" artifact "$n" --out "$root/dist"

@@ -15,6 +15,8 @@ const files = js('kit/runtime').concat(js('kit/id8'));
 fs.readdirSync(path.join(root, 'apps')).forEach((a) => { if (fs.existsSync(path.join(root, 'apps', a, 'app.json'))) files.push(...js(path.join('apps', a))); });
 // the RideTube service runs on the unit's Node 8 as well (its unit: /usr/bin/node; thumb.js is run by jap-node22)
 if (fs.existsSync(path.join(root, 'native', 'jap-ridetube-d', 'ytd.js'))) files.push(path.join('native', 'jap-ridetube-d', 'ytd.js'));
+// the collector runs on the unit's Node 8 too
+if (fs.existsSync(path.join(root, 'tools', 'id8_collect.js'))) files.push(path.join('tools', 'id8_collect.js'));
 
 let acorn = null;
 try {

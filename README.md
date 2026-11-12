@@ -129,6 +129,13 @@ in the issues.
 What may need a fix on the car, and how to tell (`journalctl -u jap-ridetube-d`, the app's
 `/var/opt/public/oap/oap_<uid>/data/jap_ridetube8.log`):
 
+- **Getting a unit's facts onto a computer** (for a head unit RideTube does not play on yet). `tools/id8_collect.js`
+  runs on the head unit, read only, over the SSH you installed the Store with:
+  `<your ssh command for the car> node < tools/id8_collect.js > ridetube-id8-data.txt` (cmd.exe, bash, zsh; in
+  PowerShell wrap it in `cmd /c "..."`). It takes the interface descriptions, the app manager's and up to four
+  apps' media code, the Store's status and RideTube's logs; never the account files or other apps' data (the list
+  is at the top of the script). `node tools/id8_unpack.js ridetube-id8-data.txt <folder>` turns it into files. What
+  it takes from the unit is BMW's: keep it private.
 - **The sound.** The service plays through BMW's media player as on iDrive 7 (the audio manager's CommandControl,
   the MediaPlayer instance `OapGenericMedia`, source 1046, sink 1024), and looks further where an iDrive 8 keeps
   them elsewhere (`native/jap-ridetube-d/README.md`). If a video ends with "Error: the car's audio is not ready
