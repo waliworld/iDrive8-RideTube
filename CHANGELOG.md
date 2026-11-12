@@ -1,5 +1,14 @@
 # Changelog
 
+## Service 0.4.4: iDrive 8, the start-up probing of 0.4.2 and 0.4.3 is off
+
+After 0.4.3 a car's Store apps were slow to show after a start, then did not show. Not proven to be the service, but
+0.4.3 was the first to load the app manager's generator in its own (root) process, to open a second CommandControl
+proxy and DynamicMediaPlayer proxies, to ask all 55 players, and to read the apps' code 45 s after the start. All
+of it is off by default now (`probe`): the service makes the two proxies iDrive 7 needs and nothing else. The
+Diagnostics page still prints the DynamicMediaPlayer's description (a file read) and reads the code around it, but
+only when the page is opened, three minutes or more after the service started, and slowly.
+
 ## Service 0.4.3: iDrive 8, what plays for the apps there (diagnostics; the app stays 0.4.5)
 
 The Diagnostics pages of 0.4.2 from a car: the MediaPlayer's `OapGenericMedia` (service 0xb042, instance 0x28) is not

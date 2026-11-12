@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.4.3';
+const VERSION = '0.4.4';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -77,6 +77,10 @@ function defaults() {
         // the unit's interface catalog and the app manager's bundles (its generator): Audio.generate
         catalogs: ['/etc/oap/someip/someip-interfaces.json'],
         searchRoots: ['/usr/lib', '/usr/share', '/etc', '/opt', '/var/opt/public'], // the Diagnostics page's search, when a description is missing
+        // Off since 0.4.4: after 0.4.3 a car's Store apps stopped showing. With probe off the service makes the two
+        // proxies iDrive 7 needs and nothing else: no other player or DynamicMediaPlayer proxy, no second
+        // CommandControl proxy, and the app manager's generator is not loaded for the lists.
+        probe: false,
         playerWaitMs: 3000,   // at the start, the media player given this long to answer before another is looked for
         probeMs: 3000,        // ... and the players asked for this long
         playerAfterMs: 4000,  // at a play, a player that does not answer given this long once its source is connected
@@ -1080,6 +1084,7 @@ Audio.prototype.dynamic = async function () {
         for (const inst of (instancesOf(y.cfg) || []).slice(0, 8)) {
             const x = { name: inst, id: idsOf(y.cfg, inst).instance, available: null, error: null };
             out.insts.push(x);
+            if (!this.opts.probe) continue;      // (the description is read; the car is not asked)
             let px = null;
             try { px = await this.proxy('DynamicMediaPlayer', y.cfg, inst, y.file, 3000); } catch (e) { x.error = errText(e); }
             if (px) x.available = await this.answers(px);
@@ -1105,7 +1110,7 @@ Audio.prototype.settlePlayer = async function () {
         let up = await this.answers(this.mp);
         while (!up && Date.now() < end) { await sleep(200); up = await this.answers(this.mp); }
         this.diag.mp.available = up;
-        if (!up) this.diag.mp.available = await this.findPlayer(ms(this.opts.probeMs, 3000));
+        if (!up && this.opts.probe) this.diag.mp.available = await this.findPlayer(ms(this.opts.probeMs, 3000));
         if (!this.diag.mp.available) await this.dynamic();
     } catch (e) { this.note('looking for the media player failed: ' + errText(e)); }
 };
@@ -1144,7 +1149,7 @@ Audio.prototype.why = function () {
  * manager's generator makes of the unit's catalog. Made once; cc when it cannot be. */
 Audio.prototype.listsFrom = async function (cc) {
     const d = this.diag;
-    if (!d.cc || !d.cc.lacks || d.cc.lacks.indexOf('listOfMainSources') < 0) return cc;
+    if (!this.opts.probe || !d.cc || !d.cc.lacks || d.cc.lacks.indexOf('listOfMainSources') < 0) return cc;
     if (this.ccLists === undefined) {
         this.ccLists = null;
         try {
@@ -1266,7 +1271,7 @@ Audio.prototype.playNow = async function (file) {
     const ms = (v, dflt) => (v === undefined ? dflt : v);
     try {
         // the player: the measured one where the car offers it, else one it does offer (a short look: the proxies are up)
-        if (!(await this.answers(this.mp)) || (this.used && this.used.inst !== this.conf().inst)) {
+        if (this.opts.probe && (!(await this.answers(this.mp)) || (this.used && this.used.inst !== this.conf().inst))) {
             try { await this.findPlayer(ms(this.opts.probeAgainMs, 500)); } catch (e) { this.note('looking for the media player failed: ' + errText(e)); }
         }
         // a route the audio manager's lists did not settle at the start: looked at again
@@ -1592,7 +1597,7 @@ Daemon.prototype.start = async function () {
             if (i) this.log('audio ready after ' + (i + 1) + ' tries');
             // a head unit that does not offer the player: how its own apps play media is read, once, a while after
             // the start and in the background, for the Diagnostics page
-            if (this.audio.diag.mp && this.audio.diag.mp.available === false) {
+            if (this.opts.probe && this.audio.diag.mp && this.audio.diag.mp.available === false) {
                 const t = setTimeout(() => { this.scanCode().catch(() => {}); }, this.opts.codeScanDelayMs);
                 if (t.unref) t.unref();
                 this.timers.push(t);
@@ -1847,7 +1852,7 @@ Daemon.prototype.scanCode = async function () {
             names.filter((n) => /\.js$/.test(n)).forEach((n) => list.push({ p: path.join(m.root, n), label: 'the app manager' }));
         });
         homes.forEach((h) => walk(path.join(o.oapRoot, h), h, 6));
-        const end = Date.now() + 60000;
+        const end = Date.now() + 180000;
         for (const f of list) {
             if (this.closed || Date.now() > end || c.bytes > (300 << 20)) break;
             if (/jap_ridetube/.test(f.p)) continue;      // (our own app names what is looked for)
@@ -1900,7 +1905,7 @@ Daemon.prototype.scanCode = async function () {
                 let z;
                 while ((z = callRe.exec(part)) && Object.keys(c.calls).length < 30) c.calls[z[1] + ' ' + z[2]] = z[3].replace(/\s+/g, ' ').slice(0, 90);
             }
-            await sleep(15);
+            await sleep(this.opts.probe ? 15 : 120);
         }
         c.state = 'done';
     } catch (e) {
@@ -1999,7 +2004,10 @@ Daemon.prototype.diagLines = async function () {
     run.forEach((l) => out.push(l));
     out.push('# How the installed apps play media');
     // (read once, when the car does not offer the player: asked for here too, shown when done)
-    if (!this.code && d.ready && d.mp && d.mp.available === false) this.scanCode().catch(() => {});
+    // never while the head unit is starting its apps: the service has to have run scanAfterS
+    const early = process.uptime() < (o.scanAfterS === undefined ? 180 : o.scanAfterS);
+    if (!this.code && d.ready && d.mp && d.mp.available === false && !early) this.scanCode().catch(() => {});
+    if (!this.code && early) out.push('Not read yet: the service waits ' + (o.scanAfterS === undefined ? 180 : o.scanAfterS) + ' s after its start, so the car\'s own apps start first. Refresh later.');
     this.codeLines().forEach((l) => out.push(l));
     out.push('# Files');
     let inv;

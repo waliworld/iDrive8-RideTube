@@ -1574,7 +1574,7 @@ async function main() {
         return Object.assign(px, { tag: cfg.name + '|' + inst, subsOf: subsOf, isAvailable: async () => !!up[cfg.name + '|' + inst], subscribe: (x) => { subsOf[x.name] = x.onReceive; },
             callMethod: async (m, a) => { calls.push({ inst: cfg.name + '|' + inst, m: m, a: a }); if (!up[cfg.name + '|' + inst]) throw new Error('Service unavailable for call ' + m + '()'); return { EntError: 'OK' }; } });
     } });
-    const quick = { playerWaitMs: 40, probeMs: 40, playerAfterMs: 60, probeAgainMs: 20, availWaitMs: 200 };
+    const quick = { probe: true, scanAfterS: 0, playerWaitMs: 40, probeMs: 40, playerAfterMs: 60, probeAgainMs: 20, availWaitMs: 200 };
     const MPF = 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json', MP2F = 'de_bmw_infotainment_entertainment_mediaplayer2_MediaPlayer2.json';
     const SRC = [{ sourceID: 1046, name: 'OapGenericMedia' }, { sourceID: 2050, name: 'OAP_GENERIC_MEDIA_PLAYER' }, { sourceID: 129, name: 'Tuner' }];
 
@@ -1801,6 +1801,33 @@ async function main() {
         assert.deepStrictEqual(calls.filter((c) => c.m === 'connect').map((c) => c.inst), ['ccTrim']);
         await d6.audio.release();
         await d6.close();
+    });
+
+    await t('0.4.4, as shipped (probe off): the two proxies of iDrive 7 and nothing else - no other player, no DynamicMediaPlayer proxy, no generator, no code read at the start', async () => {
+        const root = mkRoot('quiet');
+        mkPlayers(root, { [MPF]: { name: 'mp', serviceId: 100, instances: { OapGenericMedia: 3, Usb: 1, OapGenericMediaPlayer: 9 } },
+            'de_bmw_infotainment_entertainment_dynamicmediaplayer_DynamicMediaPlayer.json': { name: 'dyn', serviceId: 300, instances: { A: 1 }, methods: { createPlayer: {} } } });
+        fs.writeFileSync(path.join(root, 'org_genivi_am_commandinterface_CommandControl.json'), JSON.stringify({ name: 'CommandControl', serviceId: 4660, instances: { 1: 1 }, methods: { connect: {} }, fields: { listOfMainConnections: {} } }));
+        const gen = path.join(root, 'AppManagement.js');
+        fs.writeFileSync(gen, 'global.__generatorLoaded = true; ({"someip-interfaces-generator/IFConfigGenerator":7}),{},[7]);');
+        fs.writeFileSync(path.join(root, 'cat.json'), JSON.stringify({ interfaces: { 'org.genivi.am.commandinterface.CommandControl': {} } }));
+        const sip = playersSip({ 'mp|Usb': true, 'mp|OapGenericMediaPlayer': true }, SRC);
+        const dq = new Daemon({ someip: sip, srcGen: root, oapRoot: path.join(root, 'oap'), catalogs: [path.join(root, 'cat.json')], generators: [gen], mainapps: [], policyDirs: [], searchRoots: [],
+            procRoot: path.join(root, 'proc'), unitDirs: [], asound: path.join(root, 'asound'), ytdec: fakeYtdec, cacheDir: path.join(root, 'cache'), logDir: tmp, sock: path.join(tmp, 'ctlq.sock'), stateDir: path.join(tmp, 'stq'),
+            noSetuid: true, spare: false, resume: false, fetchRetryMs: [], noHwCheck: true, accountFile: path.join(tmp, 'acctq.json'), ytRequest: fakeYt, audioConf: path.join(root, 'audio.json'),
+            playerWaitMs: 40, playerAfterMs: 60, availWaitMs: 200, codeScanDelayMs: 10, log() {} });
+        assert.strictEqual(dq.opts.probe, false);
+        await dq.start();
+        await sleep(150);
+        await assert.rejects(dq.audio.playNow('/x/audio.m4a'), /does not offer the media player "OapGenericMedia"/);
+        await dq.audio.release();
+        const all = (await dq.diagLines()).join('\n');
+        assert.deepStrictEqual(sip.built, ['CommandControl|1', 'mp|OapGenericMedia']);
+        assert.ok(!global.__generatorLoaded, 'the app manager\'s code was loaded');
+        assert.strictEqual(dq.code, undefined, 'the code was read at the start');
+        assert.ok(/# The dynamic media player\nDescription .*DynamicMediaPlayer\.json \| service 0x12c \| instances: A=0x1 unknown\nIts fields now: none read\nThe description: \{name:dyn, /.test(all), all);
+        assert.ok(all.indexOf('Not read yet: the service waits 180 s after its start') >= 0, all);
+        await dq.close();
     });
 
     await t('a daemon whose audio never comes up: a play ends with the reason (not "audio service timed out"), diag says NOT READY, the start goes on trying', async () => {
