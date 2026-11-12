@@ -172,6 +172,24 @@ out.lists['/var/opt/jap-ridetube-d'] = ls('/var/opt/jap-ridetube-d');
         names.filter(function (n) { return /media|player|entertain|audio|oap|mgu-|jap-/i.test(n) && /\.(service|socket|target)$/.test(n); }).slice(0, 80).forEach(function (n) { take(d + '/' + n, 20000); });
     });
     take('/proc/asound/cards', 8000); take('/proc/asound/pcm', 8000); take('/proc/asound/devices', 8000);
+    // how sound is played here: ALSA's configuration, the audio manager's configuration, what could play a file
+    take('/etc/asound.conf', 1 << 20); take('/usr/share/alsa/alsa.conf', 1 << 20);
+    ['/usr/share/alsa/alsa.conf.d', '/etc/alsa/conf.d', '/etc/mediaconfig'].forEach(function (d) {
+        out.lists[d] = ls(d);
+        (ls(d) || []).filter(function (n) { return /\.(conf|xml|cfg|json|txt)$/.test(n); }).slice(0, 60).forEach(function (n) { take(d + '/' + n, 400000); });
+    });
+    out.lists['/usr/share/audiomanager'] = ls('/usr/share/audiomanager');
+    (ls('/usr/share/audiomanager') || []).forEach(function (n) {
+        // (binary configurations: the names in them)
+        try {
+            var s = stat('/usr/share/audiomanager/' + n);
+            if (!s || !s.isFile() || s.size > (6 << 20)) return;
+            var names = fs.readFileSync(R('/usr/share/audiomanager/' + n)).toString('latin1').match(/[A-Za-z][A-Za-z0-9_:.-]{3,60}/g) || [];
+            out.files['/usr/share/audiomanager/' + n + '#names'] = { size: s.size, text: names.filter(function (x, i) { return names.indexOf(x) === i; }).slice(0, 6000).join('\n') };
+        } catch (e) { /* not readable */ }
+    });
+    out.lists['/usr/bin (players)'] = (ls('/usr/bin') || []).filter(function (n) { return /^gst-|^aplay$|^ffmpeg$|^mpv$|media|player|audio/i.test(n); });
+    ['/usr/lib/gstreamer-1.0', '/usr/lib64/gstreamer-1.0'].forEach(function (d) { out.lists[d] = ls(d); });
     take('/etc/os-release', 4000); take('/proc/version', 1000); take('/proc/uptime', 100); take('/etc/passwd', 60000); take('/etc/group', 60000);
     out.lists['/usr/lib (mfx, va, gst)'] = (ls('/usr/lib') || []).filter(function (n) { return /mfx|libva|gstreamer|someip/i.test(n); });
     out.lists['/dev/dri'] = ls('/dev/dri');

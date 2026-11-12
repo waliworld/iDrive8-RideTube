@@ -1,5 +1,20 @@
 # Changelog
 
+## Service 0.4.5: iDrive 8, the Diagnostics page says the rest (the app stays 0.4.5)
+
+With 0.4.4 the car's Store apps show again. Its pages gave the DynamicMediaPlayer (service 0xb0c0, five instances,
+methods that take a token: addToPlaylist, sendButtonEventDirect, setCurrentItemPositionAndTime ...) but cut its
+description in half, and the code around it was still being read when the pages were photographed.
+
+- The description is printed in short and whole: every method with its arguments and answer, the fields and events,
+  each enumeration once.
+- The reading of the apps' code sends the page again when it is done (no Refresh).
+- *What runs the media* also names the sound devices (ALSA's configuration), the audio manager's names of the OAP,
+  online and dynamic media, and what on the unit could play a file (gst-launch-1.0, aplay; the GStreamer plugins).
+- CommandControl: where MainApp's description lacks the lists of sources and sinks, an installed app's own
+  description of the same interface is used (one proxy, as before), so the page shows the car's sources and sinks.
+- `tools/id8_collect.js` takes the same sound facts.
+
 ## Service 0.4.4: iDrive 8, the start-up probing of 0.4.2 and 0.4.3 is off
 
 After 0.4.3 a car's Store apps were slow to show after a start, then did not show. Not proven to be the service, but

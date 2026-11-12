@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.4.4';
+const VERSION = '0.4.5';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -811,7 +811,21 @@ Audio.prototype.describe = function (kind, want) {
     const file = kind === 'cc' ? CC_FILE : MP_FILE;
     const name = kind === 'cc' ? 'CommandControl' : 'MediaPlayer';
     let first;
-    try { return { cfg: this.iface(file), file: this.ifaceFile }; } catch (e) { first = e; }
+    let got = null;
+    try { got = { cfg: this.iface(file), file: this.ifaceFile }; } catch (e) { first = e; }
+    if (got) {
+        // iDrive 8's MainApp keeps a CommandControl description without the lists of sources and sinks: an installed
+        // app's own (the app manager made it of the same interface) that lacks nothing is used instead - still one proxy
+        const has = offered(got.cfg), lacks = has && kind === 'cc' ? CC_NEEDS.filter((n) => has.indexOf(n) < 0) : [];
+        if (!lacks.length) return got;
+        const full = this.candidates(kind).filter((c) => {
+            const h = offered(c.cfg);
+            return c.app && c.exact && h && CC_NEEDS.every((n) => h.indexOf(n) >= 0) && (!c.insts.length || c.insts.indexOf(want) >= 0);
+        })[0];
+        if (!full) return got;
+        this.note('MainApp\'s CommandControl description lacks ' + lacks.join(', ') + ': using ' + full.file);
+        return { cfg: full.cfg, file: full.file };
+    }
     const all = this.candidates(kind).filter((c) => c.app || !c.exact);
     const cands = all.some((c) => c.exact) ? all.filter((c) => c.exact) : all;
     if (cands.length) {
@@ -1770,6 +1784,41 @@ function someipPolicies(dirs, services) {
     });
     return out;
 }
+/* An interface description in short, for the page: its methods with their arguments and answers, its other
+ * sections (fields, events) with their types, and every enumeration once (E1, E2, ...). Read as MainApp's
+ * descriptions are written: { methods: { name: { id, schema: { t: 'Struct', e: [{ n, t, e }] }, retSchema } } }, a type
+ * { t, e } with e the members (Struct, Union), the element (arrays) or the names (Enum). Lines. */
+function describeIface(cfg) {
+    const enums = [], seen = {};
+    const en = (e) => { const k = JSON.stringify(e); if (seen[k] === undefined) { seen[k] = enums.length; enums.push(e); } return 'E' + (seen[k] + 1); };
+    const ty = (n, depth) => {
+        if (!n || typeof n !== 'object') return String(n);
+        if (depth > 8) return '...';
+        if (n.t === 'Enum' && n.e && typeof n.e === 'object' && !Array.isArray(n.e)) return en(n.e);
+        if (Array.isArray(n.e)) {
+            const parts = n.e.map((m) => (m && m.n !== undefined ? m.n + ':' : '') + ty(m, depth + 1));
+            return n.t === 'Union' ? '(' + parts.join(' | ') + ')' : '{' + parts.join(', ') + '}';
+        }
+        if (n.e && typeof n.e === 'object') return ty(n.e, depth + 1) + '[]';
+        return n.t !== undefined ? String(n.t) : JSON.stringify(n).slice(0, 120);
+    };
+    const members = (sc) => (sc && Array.isArray(sc.e) ? sc.e.map((m) => (m && m.n !== undefined ? m.n + ':' : '') + ty(m, 1)).join(', ') : sc ? ty(sc, 1) : '');
+    const out = [];
+    Object.keys(cfg || {}).forEach((k) => {
+        const v = cfg[k];
+        if (k === 'name' || k === 'serviceId' || k === 'instances') return;
+        if (!v || typeof v !== 'object' || Array.isArray(v)) { out.push(k + ': ' + String(JSON.stringify(v)).slice(0, 300)); return; }
+        const names = Object.keys(v);
+        if (names.every((n) => !v[n] || typeof v[n] !== 'object')) { out.push(k + ': ' + JSON.stringify(v).replace(/"/g, '').slice(0, 300)); return; }
+        out.push(k + ' (' + names.length + '): ' + names.map((n) => {
+            const x = v[n] || {};
+            if (!x.schema && !x.retSchema && x.t === undefined) return n + ' ' + JSON.stringify(x).replace(/"/g, '').slice(0, 160);
+            return n + (k === 'methods' || x.retSchema ? '(' + members(x.schema) + ')' + (x.retSchema ? ' -> ' + members(x.retSchema) : '') : ': ' + (x.schema ? ty(x.schema, 1) : ty(x, 1)));
+        }).join(' | '));
+    });
+    enums.forEach((e, i) => out.push('E' + (i + 1) + ' = ' + JSON.stringify(e).replace(/"/g, '').replace(/,/g, ', ')));
+    return out.map((l) => (l.length > 9000 ? l.slice(0, 9000) + ' ... (+' + (l.length - 9000) + ' more)' : l));
+}
 /* What runs the media and the audio on this head unit: the processes named like them (their uid and command, from
  * /proc), the systemd units named like them (with their state where systemctl says it within 3 s), and the sound
  * cards. Lines for the page. */
@@ -1807,9 +1856,37 @@ async function carMedia(o) {
     out.push('Units of the media and the audio: ' + (shown.length ? cap(shown.map((n, i) => n.replace(/\.service$/, '') + (states.length === shown.length ? ' (' + states[i] + ')' : '')), 40) +
         (units.length > 40 ? ' | +' + (units.length - 40) + ' more' : '') : 'none found'));
     const snd = o.asound || '/proc/asound';
-    const txt = (f) => { try { return fs.readFileSync(path.join(snd, f), 'utf8').replace(/\s+/g, ' ').trim().slice(0, 500); } catch (e) { return null; } };
+    const txt = (f) => { try { return fs.readFileSync(path.join(snd, f), 'utf8').replace(/\s+/g, ' ').trim().slice(0, 1600); } catch (e) { return null; } };
     const cards = txt('cards'), pcm = txt('pcm');
     out.push('Sound cards: ' + (cards === null ? 'not readable' : cards || 'none') + (pcm ? ' | devices: ' + pcm : ''));
+    // the names sound is played to (ALSA's configuration), the audio manager's names of the media, and what could play
+    const uniq = (l) => l.filter((x, i) => l.indexOf(x) === i);
+    const small = (f, max) => { try { const st = fs.statSync(f); return st.isFile() && st.size <= max ? fs.readFileSync(f) : null; } catch (e) { return null; } };
+    const ls = (d) => { try { return fs.readdirSync(d).sort(); } catch (e) { return []; } };
+    let pcms = [];
+    (o.alsaConf || ['/etc/asound.conf', '/usr/share/alsa/alsa.conf.d', '/etc/alsa/conf.d', '/usr/share/alsa/alsa.conf']).forEach((f) => {
+        [f].concat(ls(f).map((n) => path.join(f, n))).forEach((file) => {
+            const b = small(file, 2 << 20), re = /(?:^|\n)\s*pcm\.!?([\w.-]+)/g;
+            let x;
+            while (b && (x = re.exec(b.toString('latin1'))) && pcms.length < 400) pcms.push(x[1]);
+        });
+    });
+    pcms = uniq(pcms);
+    out.push('Sound device names (ALSA configuration): ' + (pcms.length ? pcms.slice(0, 90).join(', ') + (pcms.length > 90 ? ' (+' + (pcms.length - 90) + ' more)' : '') : 'none found'));
+    let names = [];
+    const amDir = o.amDir || '/usr/share/audiomanager';
+    ls(amDir).forEach((n) => {
+        const b = small(path.join(amDir, n), 6 << 20), re = /[A-Za-z][A-Za-z0-9_]{3,48}/g;
+        let x;
+        while (b && (x = re.exec(b.toString('latin1'))) && names.length < 4000) if (/oap|generic|online|entertain|dynamic|browser/i.test(x[0])) names.push(x[0]);
+    });
+    names = uniq(names);
+    out.push('The audio manager\'s names of the OAP, online and dynamic media (' + amDir + ': ' + (ls(amDir).slice(0, 8).join(', ') || 'not there') + '): ' +
+        (names.length ? names.slice(0, 70).join(', ') + (names.length > 70 ? ' (+' + (names.length - 70) + ' more)' : '') : 'none found'));
+    const bins = ['gst-launch-1.0', 'gst-play-1.0', 'gst-inspect-1.0', 'aplay', 'ffmpeg', 'mpv'].filter((n) => (o.binDirs || ['/usr/bin', '/bin']).some((d) => fs.existsSync(path.join(d, n))));
+    let plug = [];
+    (o.gstDirs || ['/usr/lib/gstreamer-1.0', '/usr/lib64/gstreamer-1.0']).forEach((d) => { plug = plug.concat(ls(d).filter((n) => /aac|faad|fdk|opus|alsa|libav|isomp4|audioparsers|audioconvert|audioresample|playback|smartx|ias/i.test(n))); });
+    out.push('What could play a file: ' + (bins.join(', ') || 'none of gst-launch-1.0, aplay, ffmpeg') + ' | GStreamer plugins: ' + (uniq(plug).map((n) => n.replace(/^libgst|\.so$/g, '')).slice(0, 40).join(', ') || 'none found'));
     return out;
 }
 /* How the apps installed on this head unit play media: their code (the .js of every app home and of the app manager,
@@ -1986,9 +2063,9 @@ Daemon.prototype.diagLines = async function () {
                 (x.error ? 'FAILED (' + x.error.slice(0, 60) + ')' : yn(x.available))).join(', ') : 'none listed'));
             const vals = Object.keys(dyn.values);
             out.push('Its fields now: ' + (vals.length ? vals.map((k) => k + ' = ' + dyn.values[k]).join(' | ') : 'none read'));
-            let text = '';
-            try { text = JSON.stringify(a.dyn.cfg).replace(/"/g, '').replace(/,/g, ', '); } catch (e) { text = 'not printable'; }
-            out.push('The description: ' + text.slice(0, 7000) + (text.length > 7000 ? ' ... (+' + (text.length - 7000) + ' more)' : ''));
+            let short;
+            try { short = describeIface(a.dyn.cfg); } catch (e) { short = ['the description could not be printed: ' + errText(e)]; }
+            short.forEach((l) => out.push(l));
         }
     }
     out.push('# Who may use them');
@@ -2006,7 +2083,8 @@ Daemon.prototype.diagLines = async function () {
     // (read once, when the car does not offer the player: asked for here too, shown when done)
     // never while the head unit is starting its apps: the service has to have run scanAfterS
     const early = process.uptime() < (o.scanAfterS === undefined ? 180 : o.scanAfterS);
-    if (!this.code && d.ready && d.mp && d.mp.available === false && !early) this.scanCode().catch(() => {});
+    // (when it is done the page is sent again: no Refresh needed)
+    if (!this.code && d.ready && d.mp && d.mp.available === false && !early) this.scanCode().then(() => { if (!this.closed) return this.sendDiag(); }).catch(() => {});
     if (!this.code && early) out.push('Not read yet: the service waits ' + (o.scanAfterS === undefined ? 180 : o.scanAfterS) + ' s after its start, so the car\'s own apps start first. Refresh later.');
     this.codeLines().forEach((l) => out.push(l));
     out.push('# Files');
@@ -2683,7 +2761,7 @@ Daemon.prototype.close = async function () {
     if (this.server) this.server.close();
 };
 
-module.exports = { VERSION: VERSION, carMedia: carMedia, audioInventory: audioInventory, someipPolicies: someipPolicies, qualityHeight: qualityHeight, channelTiles: channelTiles, Daemon: Daemon, Audio: Audio, Account: Account, feedItems: feedItems, isPlayable: isPlayable, feedShelves: feedShelves, ytRequest: ytRequest, uplinkLookup: uplinkLookup, pickFetchUid: pickFetchUid, fetchRequest: fetchRequest, listCache: listCache, pruneCache: pruneCache, isReady: isReady };
+module.exports = { VERSION: VERSION, describeIface: describeIface, carMedia: carMedia, audioInventory: audioInventory, someipPolicies: someipPolicies, qualityHeight: qualityHeight, channelTiles: channelTiles, Daemon: Daemon, Audio: Audio, Account: Account, feedItems: feedItems, isPlayable: isPlayable, feedShelves: feedShelves, ytRequest: ytRequest, uplinkLookup: uplinkLookup, pickFetchUid: pickFetchUid, fetchRequest: fetchRequest, listCache: listCache, pruneCache: pruneCache, isReady: isReady };
 
 // the uplink's DNS servers (its lease): the system resolver (127.0.0.1) answers no internet names. No
 // lease (uplink down or not installed): the system resolver, as before

@@ -1,7 +1,7 @@
 {
   "id": "jap-ridetube-d",
   "kind": "tool",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "license": "GPL-3.0-or-later",
   "title": "RideTube service",
   "description": "The car side of RideTube, an unofficial client for YouTube: yt-dlp (from its official release, run in mgu-python) fetches as the daemon's own internet uid; search, feeds and thumbnails on the car (jap-node22); audio through the BMW MediaPlayer, video decoded by ytdec into the mgu-render video layer; TV device sign-in; controlled by the RideTube app over /run/jap-ridetube-d/ctl.sock. iDrive 7 and iDrive 8",

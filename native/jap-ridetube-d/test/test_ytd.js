@@ -1742,7 +1742,13 @@ async function main() {
         fs.mkdirSync(gen, { recursive: true });
         fs.writeFileSync(path.join(gen, 'org_genivi_am_commandinterface_CommandControl.json'), JSON.stringify({ name: 'ccTrim', serviceId: 0xb020, instances: { 1: 1 }, methods: { connect: {}, disconnect: {} }, fields: { listOfMainConnections: {} } }));
         fs.writeFileSync(path.join(gen, 'de_bmw_infotainment_entertainment_dynamicmediaplayer_DynamicMediaPlayer.json'),
-            JSON.stringify({ name: 'dyn', serviceId: 0xb050, instances: { DynInstA: 1, DynInstB: 2 }, methods: { createPlayer: { in: [{ name: 'playerName', type: 'String' }] } }, fields: { activePlayers: {}, broken: {} } }));
+            JSON.stringify({ name: 'dyn', serviceId: 0xb050, instances: { DynInstA: 1, DynInstB: 2 }, methods: { createPlayer: { id: 3, schema: { t: 'Struct', e: [{ n: 'playerName', t: 'Utf16D' }, { n: 'kind', t: 'Enum', e: { MEDIA: 0, OVERLAY: 1 } }] },
+                retSchema: { t: 'Struct', e: [{ n: 'token', t: 'Utf16D' }] } } }, fields: { activePlayers: { id: 9, schema: { t: 'ArrayD', e: { t: 'Utf16D' } } }, broken: { id: 10, schema: { t: 'UInt8' } } } }));
+        fs.mkdirSync(path.join(root, 'am'));
+        fs.writeFileSync(path.join(root, 'am', 'SmartXMGU.bin'), Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from('OapGenericMediaStereo'), Buffer.from([0, 7]), Buffer.from('TelRing_Outband'), Buffer.from([0]), Buffer.from('OnlineEntertainment_Main')]));
+        fs.writeFileSync(path.join(root, 'asound.conf'), 'pcm.!default {\n type plug\n}\npcm.smartx_media {\n type smartx\n}\n');
+        fs.mkdirSync(path.join(root, 'bin')); fs.writeFileSync(path.join(root, 'bin', 'gst-launch-1.0'), '');
+        fs.mkdirSync(path.join(root, 'gst')); ['libgstfdkaac.so', 'libgstalsa.so', 'libgstvideo4linux2.so'].forEach((n) => fs.writeFileSync(path.join(root, 'gst', n), ''));
         fs.mkdirSync(path.join(root, 'oap', 'oap_12204', 'someipInterfaces'), { recursive: true });
         const many = {};
         ['OapGenericMedia', 'Usb', 'DynamicMedia', 'A1', 'A2', 'A3', 'A4', 'A5', 'A6', 'A7', 'A8', 'A9', 'A10'].forEach((n, i) => { many[n] = i + 1; });
@@ -1774,7 +1780,8 @@ async function main() {
         } };
         const d6 = new Daemon(Object.assign({ someip: sip, srcGens: [path.join(root, 'usr/lib/oap-mainapp/src-gen'), gen], srcGen: null, oapRoot: path.join(root, 'oap'), catalogs: [path.join(root, 'cat.json')],
             generators: [path.join(main, 'src', 'AppManagement', 'AppManagement.js')], mainapps: [{ root: main, hmi: 'Hmi8' }], policyDirs: [path.join(root, 'none')], procRoot: path.join(root, 'proc'),
-            unitDirs: [path.join(root, 'units')], asound: path.join(root, 'asound'), systemctl: path.join(root, 'no-systemctl'), searchRoots: [], ytdec: fakeYtdec, cacheDir: path.join(root, 'cache'), logDir: tmp,
+            unitDirs: [path.join(root, 'units')], asound: path.join(root, 'asound'), systemctl: path.join(root, 'no-systemctl'), amDir: path.join(root, 'am'), alsaConf: [path.join(root, 'asound.conf')],
+            binDirs: [path.join(root, 'bin')], gstDirs: [path.join(root, 'gst')], searchRoots: [], ytdec: fakeYtdec, cacheDir: path.join(root, 'cache'), logDir: tmp,
             sock: path.join(tmp, 'ctl6.sock'), stateDir: path.join(tmp, 'st6'), noSetuid: true, spare: false, resume: false, fetchRetryMs: [], noHwCheck: true, accountFile: path.join(tmp, 'acct6.json'),
             ytRequest: fakeYt, audioConf: path.join(root, 'audio.json'), codeScanDelayMs: 20, log() {} }, quick));
         calls.length = 0;
@@ -1787,10 +1794,12 @@ async function main() {
         assert.ok(all.indexOf('Players the car offers: 13 asked | answering: Usb=0x2 | of the OAP, dynamic and online ones: OapGenericMedia=0x1 NO, DynamicMedia=0x3 NO') >= 0, all);
         assert.ok(all.indexOf('# The dynamic media player\nDescription /usr/lib/oap-mainapp21/src-gen/someip/de_bmw_infotainment_entertainment_dynamicmediaplayer_DynamicMediaPlayer.json | service 0xb050 | instances: DynInstA=0x1 NO, DynInstB=0x2 yes\n' +
             'Its fields now: activePlayers = [{"name":"CarPlayMedia"}] | broken = (nope)\n' +
-            'The description: {name:dyn, serviceId:45136, instances:{DynInstA:1, DynInstB:2}, methods:{createPlayer:{in:[{name:playerName, type:String}]}}, fields:{activePlayers:{}, broken:{}}}') >= 0, all);
+            'methods (1): createPlayer(playerName:Utf16D, kind:E1) -> token:Utf16D\nfields (2): activePlayers: Utf16D[] | broken: UInt8\nE1 = {MEDIA:0, OVERLAY:1}\n') >= 0, all);
+        assert.ok(all.indexOf('Sound device names (ALSA configuration): default, smartx_media\nThe audio manager\'s names of the OAP, online and dynamic media (/am: SmartXMGU.bin): OapGenericMediaStereo, OnlineEntertainment_Main\n' +
+            'What could play a file: gst-launch-1.0 | GStreamer plugins: alsa, fdkaac') >= 0, all);
         assert.ok(all.indexOf('DynamicMediaPlayer: its description gives') < 0 && /SOME\/IP security: no policies/.test(all), all);
         assert.ok(all.indexOf('# What runs the media\nProcesses of the media and the audio (uid: command): ' + fs.statSync(path.join(root, 'proc', '77')).uid + ': /usr/bin/mediaplayerd --instance CarPlayMedia\n' +
-            'Units of the media and the audio: mediaplayerd | oap-dynamic-player.socket\nSound cards: 0 [Dummy ]: Dummy - Dummy') >= 0, all);
+            'Units of the media and the audio: mediaplayerd | oap-dynamic-player.socket\nSound cards: 0 [Dummy ]: Dummy - Dummy\n') >= 0, all);
         assert.ok(all.indexOf('Calls near the DynamicMediaPlayer in the code: callMethod createPlayer,{playerName:"OapGenericMedia"},5000) || subscribe activePlayers,onReceive:f})') >= 0, all);
         assert.ok(/\[DynamicMediaPlayer, in the app manager\] .*buildProxy\("de\.bmw\.infotainment\.entertainment\.dynamicmediaplayer\.DynamicMediaPlayer","DynInstA"\);p\.callMethod\("createPlayer"/.test(all), all);
         assert.ok(/\[OapGenericMedia, in the app manager\] /.test(all), all);
@@ -1808,6 +1817,9 @@ async function main() {
         mkPlayers(root, { [MPF]: { name: 'mp', serviceId: 100, instances: { OapGenericMedia: 3, Usb: 1, OapGenericMediaPlayer: 9 } },
             'de_bmw_infotainment_entertainment_dynamicmediaplayer_DynamicMediaPlayer.json': { name: 'dyn', serviceId: 300, instances: { A: 1 }, methods: { createPlayer: {} } } });
         fs.writeFileSync(path.join(root, 'org_genivi_am_commandinterface_CommandControl.json'), JSON.stringify({ name: 'CommandControl', serviceId: 4660, instances: { 1: 1 }, methods: { connect: {} }, fields: { listOfMainConnections: {} } }));
+        fs.mkdirSync(path.join(root, 'oap', 'oap_12204', 'someipInterfaces'), { recursive: true });
+        const fullCc = path.join(root, 'oap', 'oap_12204', 'someipInterfaces', 'org_genivi_am_commandinterface_CommandControl.json');
+        fs.writeFileSync(fullCc, JSON.stringify({ name: 'CommandControl', serviceId: 4660, instances: { 1: 1 }, methods: { connect: {}, disconnect: {} }, fields: { listOfMainConnections: {}, listOfMainSources: {}, listOfMainSinks: {} } }));
         const gen = path.join(root, 'AppManagement.js');
         fs.writeFileSync(gen, 'global.__generatorLoaded = true; ({"someip-interfaces-generator/IFConfigGenerator":7}),{},[7]);');
         fs.writeFileSync(path.join(root, 'cat.json'), JSON.stringify({ interfaces: { 'org.genivi.am.commandinterface.CommandControl': {} } }));
@@ -1825,7 +1837,17 @@ async function main() {
         assert.deepStrictEqual(sip.built, ['CommandControl|1', 'mp|OapGenericMedia']);
         assert.ok(!global.__generatorLoaded, 'the app manager\'s code was loaded');
         assert.strictEqual(dq.code, undefined, 'the code was read at the start');
-        assert.ok(/# The dynamic media player\nDescription .*DynamicMediaPlayer\.json \| service 0x12c \| instances: A=0x1 unknown\nIts fields now: none read\nThe description: \{name:dyn, /.test(all), all);
+        assert.ok(/# The dynamic media player\nDescription .*DynamicMediaPlayer\.json \| service 0x12c \| instances: A=0x1 unknown\nIts fields now: none read\nmethods \(1\): createPlayer /.test(all), all);
+        assert.ok(all.indexOf('CommandControl: description ' + fullCc + ' | instance 1 of [1]') >= 0 && all.indexOf('Sources: 1046:OapGenericMedia 2050:OAP_GENERIC_MEDIA_PLAYER 129:Tuner\nSinks: 1024:AMP') >= 0, all);
+        assert.ok(all.indexOf('Note: MainApp\'s CommandControl description lacks disconnect, listOfMainSources, listOfMainSinks: using ' + fullCc) >= 0, all);
+        // once the service has run long enough, opening the page starts the reading, and its result comes by itself
+        dq.opts.scanAfterS = 0;
+        const cq = await client(path.join(tmp, 'ctlq.sock'));
+        cq.send({ cmd: 'diag' });
+        await waitUntil(() => cq.evs.filter((x) => x.ev === 'diag').length >= 2, 5000);
+        const last = cq.evs.filter((x) => x.ev === 'diag').pop();
+        assert.ok(last.lines.some((l) => /^\d+ files of the installed apps and the app manager read$/.test(l)), last.lines.join('\n'));
+        cq.destroy();
         assert.ok(all.indexOf('Not read yet: the service waits 180 s after its start') >= 0, all);
         await dq.close();
     });
