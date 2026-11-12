@@ -140,7 +140,7 @@ async function main() {
     const acct = path.join(stateDir, 'account.json');
     const ctl = path.join(tmp, 'fetch.ctl');
     const d = new Daemon({
-        someip: someip, srcGen: srcGen, ytdec: fakeYtdec, cacheDir: cache, logDir: tmp, sock: path.join(tmp, 'ctl.sock'),
+        diagFull: true, someip: someip, srcGen: srcGen, ytdec: fakeYtdec, cacheDir: cache, logDir: tmp, sock: path.join(tmp, 'ctl.sock'),
         watchdogMs: 800, tickMs: 200, keep: 20, stateDir: stateDir, noSetuid: true, spare: false, resume: false, fetchRetryMs: [],
         fetcher: [process.execPath, path.join(__dirname, 'fake_ytfetch.js'), ctl],
         accountFile: acct, ytRequest: fakeYt, log: (m) => logs.push(m)
@@ -1574,7 +1574,7 @@ async function main() {
         return Object.assign(px, { tag: cfg.name + '|' + inst, subsOf: subsOf, isAvailable: async () => !!up[cfg.name + '|' + inst], subscribe: (x) => { subsOf[x.name] = x.onReceive; },
             callMethod: async (m, a) => { calls.push({ inst: cfg.name + '|' + inst, m: m, a: a }); if (!up[cfg.name + '|' + inst]) throw new Error('Service unavailable for call ' + m + '()'); return { EntError: 'OK' }; } });
     } });
-    const quick = { probe: true, codeScan: true, scanAfterS: 0, playerWaitMs: 40, probeMs: 40, playerAfterMs: 60, probeAgainMs: 20, availWaitMs: 200 };
+    const quick = { probe: true, codeScan: true, diagFull: true, scanAfterS: 0, playerWaitMs: 40, probeMs: 40, playerAfterMs: 60, probeAgainMs: 20, availWaitMs: 200 };
     const MPF = 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json', MP2F = 'de_bmw_infotainment_entertainment_mediaplayer2_MediaPlayer2.json';
     const SRC = [{ sourceID: 1046, name: 'OapGenericMedia' }, { sourceID: 2050, name: 'OAP_GENERIC_MEDIA_PLAYER' }, { sourceID: 129, name: 'Tuner' }];
 
@@ -1802,7 +1802,7 @@ async function main() {
             'Units of the media and the audio: mediaplayerd | oap-dynamic-player.socket\nSound cards: 0 [Dummy ]: Dummy - Dummy\n') >= 0, all);
         assert.ok(all.indexOf('Calls near the DynamicMediaPlayer in the code: callMethod createPlayer,{playerName:"OapGenericMedia"},5000) || subscribe activePlayers,onReceive:f})') >= 0, all);
         assert.ok(/\[DynamicMediaPlayer, in the app manager\] .*buildProxy\("de\.bmw\.infotainment\.entertainment\.dynamicmediaplayer\.DynamicMediaPlayer","DynInstA"\);p\.callMethod\("createPlayer"/.test(all), all);
-        assert.ok(/\[OapGenericMedia, in the app manager\] /.test(all), all);
+        assert.ok(!/\[OapGenericMedia, in the app manager\] /.test(all), 'a word inside a piece already shown is not shown again');
         assert.deepStrictEqual(calls.filter((c) => c.inst === 'dyn'), [], 'nothing is called on the DynamicMediaPlayer');
         assert.ok(got.indexOf('ccFull|1') >= 0 && got.filter((x) => x === 'ccFull|1').length === 1, got.join(' '));
         // the calls still go to the description MainApp has
@@ -1833,23 +1833,36 @@ async function main() {
         await sleep(150);
         await assert.rejects(dq.audio.playNow('/x/audio.m4a'), /does not offer the media player "OapGenericMedia"/);
         await dq.audio.release();
-        const all = (await dq.diagLines()).join('\n');
         assert.deepStrictEqual(sip.built, ['CommandControl|1', 'mp|OapGenericMedia']);
+        // the page asks the dynamic player's first instance (one proxy, reads only), and leaves out what a car has told
+        calls.length = 0;
+        const all = (await dq.diagLines()).join('\n');
+        assert.deepStrictEqual(sip.built, ['CommandControl|1', 'mp|OapGenericMedia', 'dyn|A']);
+        assert.deepStrictEqual(calls, [], 'nothing is called for the page');
+        assert.ok(!/# Who may use them|# What runs the media|# Files/.test(all), all);
         assert.ok(!global.__generatorLoaded, 'the app manager\'s code was loaded');
         assert.strictEqual(dq.code, undefined, 'the code was read at the start');
-        assert.ok(/# The dynamic media player\nDescription .*DynamicMediaPlayer\.json \| service 0x12c \| instances: A=0x1 unknown\nIts fields now: none read\nmethods \(1\): createPlayer /.test(all), all);
+        assert.ok(/# The dynamic media player\nDescription .*DynamicMediaPlayer\.json \| service 0x12c \| instances: A=0x1 NO\nIts fields now: none read\nIts description: methods \(1\) \(printed whole by 0\.4\.6\)\n/.test(all), all);
         assert.ok(all.indexOf('CommandControl: description ' + fullCc + ' | instance 1 of [1]') >= 0 && all.indexOf('Sources: 1046:OapGenericMedia 2050:OAP_GENERIC_MEDIA_PLAYER 129:Tuner\nSinks: 1024:AMP') >= 0, all);
         assert.ok(all.indexOf('Note: MainApp\'s CommandControl description lacks disconnect, listOfMainSources, listOfMainSinks: using ' + fullCc) >= 0, all);
         // once the service has run long enough, opening the page starts the reading, and its result comes by itself
+        // then, when the page is opened: the app manager's files and the three apps named, not every app
+        const js = (rel, text) => { fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true }); fs.writeFileSync(path.join(root, rel), '/* pad */'.repeat(40) + text + '/* pad */'.repeat(40)); };
+        js('mainapp/src/media/DynamicPlayer.js', 'p.callMethod("getAudioFocus",{clientId:id,clientName:n,timeOutHeartBeatTimer:5000}).then(function(r){return p.callMethod("createPlaylist",{token:r.token,newPlaylist:[{pos:0,id:b,metadata:[{key:"FILE_NAME",value:{stringValue:f}}]}]})})');
+        js('oap/oap_12209/node_modules/bmw-music/javascript/app.js', 'mp.playFile(path)');
+        js('oap/oap_12230/node_modules/weather/javascript/app.js', 'other.playFile(1);x.getAudioFocus()');
+        dq.opts.mainapps = [{ root: path.join(root, 'mainapp'), hmi: 'Hmi8' }];
         dq.opts.scanAfterS = 0;
-        dq.opts.codeScan = true;
         const cq = await client(path.join(tmp, 'ctlq.sock'));
         cq.send({ cmd: 'diag' });
         await waitUntil(() => cq.evs.filter((x) => x.ev === 'diag').length >= 2, 5000);
         const last = cq.evs.filter((x) => x.ev === 'diag').pop();
-        assert.ok(last.lines.some((l) => /^\d+ files of the installed apps and the app manager read$/.test(l)), last.lines.join('\n'));
+        assert.ok(last.lines.some((l) => l === '2 files of the installed apps and the app manager read'), last.lines.join('\n'));
+        assert.ok(last.lines.some((l) => /^\[createPlaylist, in the app manager\] .*getAudioFocus",\{clientId:id,clientName:n,timeOutHeartBeatTimer:5000\}.*key:"FILE_NAME",value:\{stringValue:f\}/.test(l)), last.lines.join('\n'));
+        assert.ok(last.lines.some((l) => /^\[playFile, in oap_12209:bmw-music\] /.test(l)) && !last.lines.some((l) => /oap_12230/.test(l)), last.lines.join('\n'));
+        assert.strictEqual(last.lines.filter((l) => /^\[(getAudioFocus|FILE_NAME), /.test(l)).length, 0, 'shown once');
         cq.destroy();
-        assert.ok(all.indexOf('# How the installed apps play media\nNot read on the head unit (since 0.4.6). From a computer: tools/id8_collect.js.\n# Files') >= 0, all);
+        assert.ok(all.indexOf('# How the installed apps play media\nNot read yet: the service waits 180 s after its start') >= 0, all);
         await dq.close();
     });
 

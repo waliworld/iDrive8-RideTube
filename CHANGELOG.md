@@ -1,5 +1,22 @@
 # Changelog
 
+## Service 0.4.7: iDrive 8, how the car's own code asks its dynamic player to play
+
+0.4.6's pages printed the DynamicMediaPlayer whole: a player with its own audio focus and playlist -
+`getAudioFocus(clientId, clientName, timeOutHeartBeatTimer) -> token`, `createPlaylist(token, [{pos, id, metadata}])`,
+`sendButtonEventDirect(token, button, action)`, `heartBeat(token)`, `setTime`, `releaseAudioFocus`; fields
+`currentAudioFocus`, `playerState`, `currentItemTime`; events `buttonEventForward`, `playbackErrorEvent`. What an
+item must say for the car to play a file (which metadata, how the binding takes a union or a byte buffer) is not
+in a description: it is in the code that calls it.
+
+- When the Diagnostics page is opened (and the service has run three minutes), the app manager's own files and
+  three BMW apps that play media are read (not every app), and the page shows the code around `createPlaylist`,
+  `getAudioFocus`, `addToPlaylist`, `sendButtonEventDirect`, `heartBeat`, `FILE_NAME`, `playFile`. The page is sent
+  again when the reading is done.
+- The page asks the dynamic player's first instance (one proxy, reads only): whether it answers this service at all,
+  and its fields now.
+- The page leaves out what 0.4.6 has told (the description, the policies, the processes, the files).
+
 ## Service 0.4.6: iDrive 8, the service keeps away from the car while it starts
 
 The Store's apps went missing again on 0.4.4, before any update: so the start-up probing of 0.4.3 was not the cause,
