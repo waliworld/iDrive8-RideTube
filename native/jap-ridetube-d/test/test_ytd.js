@@ -1574,7 +1574,7 @@ async function main() {
         return Object.assign(px, { tag: cfg.name + '|' + inst, subsOf: subsOf, isAvailable: async () => !!up[cfg.name + '|' + inst], subscribe: (x) => { subsOf[x.name] = x.onReceive; },
             callMethod: async (m, a) => { calls.push({ inst: cfg.name + '|' + inst, m: m, a: a }); if (!up[cfg.name + '|' + inst]) throw new Error('Service unavailable for call ' + m + '()'); return { EntError: 'OK' }; } });
     } });
-    const quick = { probe: true, scanAfterS: 0, playerWaitMs: 40, probeMs: 40, playerAfterMs: 60, probeAgainMs: 20, availWaitMs: 200 };
+    const quick = { probe: true, codeScan: true, scanAfterS: 0, playerWaitMs: 40, probeMs: 40, playerAfterMs: 60, probeAgainMs: 20, availWaitMs: 200 };
     const MPF = 'de_bmw_infotainment_entertainment_mediaplayer_MediaPlayer.json', MP2F = 'de_bmw_infotainment_entertainment_mediaplayer2_MediaPlayer2.json';
     const SRC = [{ sourceID: 1046, name: 'OapGenericMedia' }, { sourceID: 2050, name: 'OAP_GENERIC_MEDIA_PLAYER' }, { sourceID: 129, name: 'Tuner' }];
 
@@ -1842,14 +1842,47 @@ async function main() {
         assert.ok(all.indexOf('Note: MainApp\'s CommandControl description lacks disconnect, listOfMainSources, listOfMainSinks: using ' + fullCc) >= 0, all);
         // once the service has run long enough, opening the page starts the reading, and its result comes by itself
         dq.opts.scanAfterS = 0;
+        dq.opts.codeScan = true;
         const cq = await client(path.join(tmp, 'ctlq.sock'));
         cq.send({ cmd: 'diag' });
         await waitUntil(() => cq.evs.filter((x) => x.ev === 'diag').length >= 2, 5000);
         const last = cq.evs.filter((x) => x.ev === 'diag').pop();
         assert.ok(last.lines.some((l) => /^\d+ files of the installed apps and the app manager read$/.test(l)), last.lines.join('\n'));
         cq.destroy();
-        assert.ok(all.indexOf('Not read yet: the service waits 180 s after its start') >= 0, all);
+        assert.ok(all.indexOf('# How the installed apps play media\nNot read on the head unit (since 0.4.6). From a computer: tools/id8_collect.js.\n# Files') >= 0, all);
         await dq.close();
+    });
+
+    await t('0.4.6, iDrive 8: nothing is asked of the car until the head unit has been up settleS seconds - the socket answers meanwhile, a play says what it waits for', async () => {
+        const root = mkRoot('settle'), upFile = path.join(root, 'uptime');
+        mkPlayers(root, { [MPF]: { name: 'mp', serviceId: 100, instances: { OapGenericMedia: 3 } } });
+        fs.writeFileSync(upFile, '20.50 80.00\n');
+        const sip = playersSip({ 'mp|OapGenericMedia': true }, SRC), lg = [];
+        const ds = new Daemon({ someip: sip, srcGen: root, oapRoot: path.join(root, 'oap'), mainapps: [], policyDirs: [], searchRoots: [], catalogs: [], generators: [], procRoot: path.join(root, 'proc'), unitDirs: [],
+            ytdec: fakeYtdec, cacheDir: path.join(root, 'cache'), logDir: tmp, sock: path.join(tmp, 'ctls.sock'), stateDir: path.join(tmp, 'sts'), noSetuid: true, spare: false, resume: false, fetchRetryMs: [], noHwCheck: true,
+            accountFile: path.join(tmp, 'accts.json'), ytRequest: fakeYt, audioConf: path.join(root, 'audio.json'), settleS: 22, uptimeFile: upFile, audioWaitMs: 200, availWaitMs: 200, log: (m) => lg.push(m) });
+        ds.start().catch((e) => lg.push('start: ' + e));
+        await waitUntil(() => fs.existsSync(path.join(tmp, 'ctls.sock')));
+        const cs = await client(path.join(tmp, 'ctls.sock'));
+        await sleep(300);
+        assert.deepStrictEqual(sip.built, [], 'no proxy while the head unit starts');
+        assert.strictEqual(ds.audio.someip, undefined, 'the binding is not loaded');
+        assert.ok(lg.some((l) => l === 'waiting 2 s before the car\'s audio is asked for: the head unit is starting'), lg.join('|'));
+        mkVideo('SettleWait1');
+        fs.renameSync(path.join(cache, 'SettleWait1'), path.join(root, 'cache', 'SettleWait1'));
+        cs.send({ cmd: 'play', id: 'SettleWait1', rect: '100x100' });
+        const e = await cs.waitFor((x) => x.ev === 'error', 4000);
+        assert.ok(/^the car's audio is not ready - waiting for the head unit to finish starting \(\d+ s more\) \(Settings > Diagnostics\)$/.test(e.msg), e.msg);
+        cs.send({ cmd: 'diag' });
+        const m = await cs.waitFor((x) => x.ev === 'diag');
+        assert.ok(m.lines.some((l) => /^NOT READY - starting \| stopped at: waiting for the head unit to finish starting/.test(l)), m.lines.join('\n'));
+        fs.writeFileSync(upFile, '23.00 90.00\n');
+        await waitUntil(() => ds.audio.diag.ready, 4000);
+        assert.deepStrictEqual(sip.built, ['CommandControl|1', 'mp|OapGenericMedia']);
+        cs.destroy();
+        await ds.close();
+        // iDrive 7 (no MainApp-21 on the unit): at once
+        assert.strictEqual(new Daemon({ log() {} }).opts.settleS, fs.existsSync('/usr/lib/oap-mainapp21') ? 150 : 0);
     });
 
     await t('a daemon whose audio never comes up: a play ends with the reason (not "audio service timed out"), diag says NOT READY, the start goes on trying', async () => {

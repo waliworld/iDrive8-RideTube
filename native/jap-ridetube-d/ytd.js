@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.4.5';
+const VERSION = '0.4.6';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -81,6 +81,13 @@ function defaults() {
         // proxies iDrive 7 needs and nothing else: no other player or DynamicMediaPlayer proxy, no second
         // CommandControl proxy, and the app manager's generator is not loaded for the lists.
         probe: false,
+        // Since 0.4.6 (a car's Store apps went missing again on 0.4.4, at some starts): on iDrive 8 the service keeps
+        // away from the car while it starts - no SOME/IP binding loaded, no proxy made - until the head unit has
+        // been up settleS seconds (iDrive 7: at once, as ever). And the apps' code is no longer read on the unit
+        // unless codeScan is set (tools/id8_collect.js reads it from a computer).
+        settleS: fs.existsSync('/usr/lib/oap-mainapp21') ? 150 : 0,
+        uptimeFile: '/proc/uptime',
+        codeScan: false,
         playerWaitMs: 3000,   // at the start, the media player given this long to answer before another is looked for
         probeMs: 3000,        // ... and the players asked for this long
         playerAfterMs: 4000,  // at a play, a player that does not answer given this long once its source is connected
@@ -1603,6 +1610,7 @@ Daemon.prototype.start = async function () {
     // will not grow it); a play or the Diagnostics page asks for a try at once (audioKick). The reason is logged when
     // it changes and every 12th try; the page shows the last one.
     let said = null;
+    await this.waitForBoot();
     for (let i = 0; !this.closed; i++) {
         try {
             await this.audio.start();
@@ -1626,6 +1634,19 @@ Daemon.prototype.start = async function () {
                 this.audioKick = () => { clearTimeout(t); this.audioKick = null; r(); };
             });
         }
+    }
+};
+/* On iDrive 8: nothing is asked of the car until the head unit has been up settleS seconds (its own apps and the
+ * Store's start first). The ctl socket is up meanwhile: search and the pages work, a play says what it waits for. */
+Daemon.prototype.waitForBoot = async function () {
+    const want = this.opts.settleS || 0;
+    const up = () => { try { return parseFloat(fs.readFileSync(this.opts.uptimeFile, 'utf8')); } catch (e) { return Infinity; } };
+    let left = want - up();
+    if (!(left > 0)) return;
+    this.log('waiting ' + Math.ceil(left) + ' s before the car\'s audio is asked for: the head unit is starting');
+    while (!this.closed && (left = want - up()) > 0) {
+        this.audio.diag.stage = 'waiting for the head unit to finish starting (' + Math.ceil(left) + ' s more)';
+        await sleep(Math.min(1000, left * 1000 + 20));
     }
 };
 // The audio up (the leftover sweep done) within ms; else the reason the car's audio is not there, for the app's
@@ -2084,9 +2105,10 @@ Daemon.prototype.diagLines = async function () {
     // never while the head unit is starting its apps: the service has to have run scanAfterS
     const early = process.uptime() < (o.scanAfterS === undefined ? 180 : o.scanAfterS);
     // (when it is done the page is sent again: no Refresh needed)
-    if (!this.code && d.ready && d.mp && d.mp.available === false && !early) this.scanCode().then(() => { if (!this.closed) return this.sendDiag(); }).catch(() => {});
-    if (!this.code && early) out.push('Not read yet: the service waits ' + (o.scanAfterS === undefined ? 180 : o.scanAfterS) + ' s after its start, so the car\'s own apps start first. Refresh later.');
-    this.codeLines().forEach((l) => out.push(l));
+    if (!o.codeScan && !this.code) out.push('Not read on the head unit (since 0.4.6). From a computer: tools/id8_collect.js.');
+    else if (!this.code && d.ready && d.mp && d.mp.available === false && !early) this.scanCode().then(() => { if (!this.closed) return this.sendDiag(); }).catch(() => {});
+    if (o.codeScan && !this.code && early) out.push('Not read yet: the service waits ' + (o.scanAfterS === undefined ? 180 : o.scanAfterS) + ' s after its start, so the car\'s own apps start first. Refresh later.');
+    if (o.codeScan || this.code) this.codeLines().forEach((l) => out.push(l));
     out.push('# Files');
     let inv;
     try { inv = audioInventory(o, !(d.cc && d.cc.file && d.mp && d.mp.file)); } catch (e) { inv = ['could not be read: ' + errText(e)]; }

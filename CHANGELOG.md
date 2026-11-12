@@ -1,5 +1,16 @@
 # Changelog
 
+## Service 0.4.6: iDrive 8, the service keeps away from the car while it starts
+
+The Store's apps went missing again on 0.4.4, before any update: so the start-up probing of 0.4.3 was not the cause,
+or not the only one. What every version of the service has done on iDrive 8 is start with the head unit and ask
+the car's SOME/IP for the audio in the same seconds the app manager and the Store's own start step run.
+
+- On iDrive 8 the service now loads no SOME/IP binding and makes no proxy until the head unit has been up 150 s. Its
+  socket answers meanwhile (search and the pages work); a play in that time says it is waiting. iDrive 7 is unchanged.
+- The apps' code is no longer read on the head unit (`codeScan`, off). `tools/id8_collect.js` reads it from a computer.
+- Whether this is the cause is not known: `tools/id8_collect.js` takes the Store's status and the start's logs.
+
 ## Service 0.4.5: iDrive 8, the Diagnostics page says the rest (the app stays 0.4.5)
 
 With 0.4.4 the car's Store apps show again. Its pages gave the DynamicMediaPlayer (service 0xb0c0, five instances,
