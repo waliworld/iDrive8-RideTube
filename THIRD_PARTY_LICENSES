@@ -124,5 +124,22 @@ RideTube itself is GPL-3.0-or-later (LICENSE). The parts below come from others.
    licensed CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/). The app credits it on its
    menu page.
 
+9. native/ytaud (the service's file "ytaud", for iDrive 8) - built from native/ytaud/ytaud.c (GPL-3.0-or-later) and
+   FAAD2 (github.com/knik0/faad2 at the commit pinned in native/ytaud/build.sh), GPL-2.0-or-later:
+
+    FAAD2 - Freeware Advanced Audio (AAC) Decoder including SBR decoding
+    Copyright (C) 2003-2005 M. Bakker, Nero AG, http://www.nero.com
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    Code from FAAD2 is copyright (c) Nero AG, www.nero.com
+
+   The program is linked static with the GNU C Library (LGPL-2.1-or-later, sourceware.org/glibc) of the build
+   machine (Ubuntu); native/ytaud/build.sh builds it again from the sources. AAC is covered by patents in some
+   countries.
+
 RideTube is not affiliated with, endorsed by or sponsored by Google LLC or YouTube. YouTube is a trademark of
 Google LLC; the name is used only to say what service the app is a client for.

@@ -149,9 +149,12 @@ walk('/etc/vsomeip', 3, function (p, n, s) { return s.size <= (2 << 20); }, 3000
     (ls(d) || []).filter(function (n) { return /\.(json|log|txt)$/.test(n); }).forEach(function (n) { take(d + '/' + n, 1 << 20, true); });
 });
 
-// 6. RideTube: its logs and its audio override - never its account files
+// 6. RideTube: its logs, its audio override and what its search for a way to sound kept - never its account files
 (ls('/var/opt/jap-ridetube-d/log') || []).forEach(function (n) { take('/var/opt/jap-ridetube-d/log/' + n, 400000, true); });
 take('/var/opt/jap-ridetube-d/state/audio.json', 4096);
+// (what the service found, tried and read of BMW's player code while looking for a way to sound: sound.js, sdkread.js)
+take('/var/opt/jap-ridetube-d/state/sound.json', 200000);
+take('/var/opt/jap-ridetube-d/state/sdk.json', 400000);
 out.lists['/var/opt/jap-ridetube-d'] = ls('/var/opt/jap-ridetube-d');
 (ls('/var/opt/public/oap') || []).forEach(function (h) { take('/var/opt/public/oap/' + h + '/data/jap_ridetube8.log', 400000, true); });
 

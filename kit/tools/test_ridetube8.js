@@ -192,11 +192,56 @@ async function main() {
     d.send({ ev: 'state', state: 'playing', id: items[0].id, title: items[0].title });
     await sleep(100);
     await hu.loopFn();
-    // (the overlay may have hidden by now: a tap shows it, then its back)
+    // iDrive 8's search for a way to sound. The model: what the service is doing is kept while a play prepares and
+    // goes when it plays; the way it found is kept from the state (and gone when a state says none)
+    const { Model } = require(path.join(stage, 'source', 'javascript', 'yt.js'));
+    const sent = [], mdl = new Model((o) => { sent.push(o); return true; });
+    mdl.onMsg({ ev: 'state', state: 'preparing', pct: 99, id: 'cat00000000' });
+    mdl.onMsg({ ev: 'note', msg: 'Finding how this car plays sound: way 3...' });
+    assert.strictEqual(mdl.note, 'Finding how this car plays sound: way 3...');
+    mdl.onMsg({ ev: 'state', state: 'playing', id: 'cat00000000', snd: { route: 'dyn:DynamicMediaPlayerMedia', name: 'x', kept: null, silent: 0 } });
+    assert.ok(mdl.note === null && mdl.snd.route === 'dyn:DynamicMediaPlayerMedia');
+    mdl.onMsg({ ev: 'note', msg: 'late' });
+    assert.strictEqual(mdl.note, null, 'a note outside a preparing play is not kept');
+    mdl.onMsg({ ev: 'state', state: 'playing', id: 'cat00000000' });
+    assert.ok(mdl.snd, 'a state without the field keeps what is known');
+    mdl.onMsg({ ev: 'state', state: 'playing', id: 'cat00000000', snd: null });
+    assert.strictEqual(mdl.snd, null);
+    // the player: "No sound?" where the service plays through a way it found - pressed twice, the verdict goes
+    d.send({ ev: 'state', state: 'preparing', pct: 99, id: items[0].id, title: items[0].title });
+    d.send({ ev: 'note', msg: 'Finding how this car plays sound: way 3...' });
+    await sleep(100);
+    await hu.loopFn();
+    snap('player-finding-sound');
+    d.send({ ev: 'state', state: 'playing', id: items[0].id, title: items[0].title, snd: { route: 'dyn:DynamicMediaPlayerMedia', name: 'the car\'s dynamic media player (Media)', kept: 'dyn:DynamicMediaPlayerMedia', silent: 0 } });
+    await sleep(100);
+    await hu.loopFn();
+    if (target('ov:back').w > 1000) { await tapTarget(target('ov:back')); await hu.loopFn(); }
+    assert.ok(target('ov:snd') && target('ov:snd').w < 200, '"No sound?" is offered: ' + disp.pageTargets.map((x) => x.key).join(' '));
+    snap('player-no-sound');
+    await tapTarget(target('ov:snd'));
+    await sleep(50);
+    assert.strictEqual(d.cmds('nosound').length, 0, 'not on the first press');
+    await hu.loopFn();
+    snap('player-no-sound-armed');
+    await tapTarget(target('ov:snd'));
+    await until(() => d.cmds('nosound').length === 1, 1000, 'the verdict is sent on the second press');
+    await hu.loopFn();
     if (target('ov:back').w > 1000) { await tapTarget(target('ov:back')); await hu.loopFn(); }
     await tapTarget(target('ov:back'));
     await hu.loopFn();
-    console.log('ok   player: 1358x764 asked, overlay, podcast mode while driving, back to the list');
+    // the card offers "Sound: start over" then (its third action from the left)
+    await tapTarget(target('rail:more'));
+    disp._paintSheet();
+    assert.strictEqual(disp.sheetTargets.length, 5, 'Close and four actions');
+    await tapTarget(disp.sheetTargets.slice(1).sort((x, y) => x.x - y.x)[2]);
+    await until(() => d.cmds('soundreset').length === 1, 1000, 'start over is sent');
+    assert.ok(!disp.sheet, 'the card closed');
+    // (a service that plays the iDrive 7 way says no such thing: the card is as before)
+    d.send({ ev: 'state', state: 'playing', id: items[0].id, title: items[0].title, snd: null });
+    await sleep(100);
+    await hu.loopFn();
+    console.log('ok   player: 1358x764 asked, overlay, podcast mode while driving, the search for sound and "No sound?", back to the list');
 
     // the rail's Settings: the card (account), Sign out twice, the settings sheet
     d.send({ ev: 'auth', state: 'signed_in' });

@@ -2,13 +2,16 @@
 
 RideTube, the unofficial YouTube client for BMW head units, **ported to iDrive 8 (MGU ID8)**. Based on
 [JustAnotherPU/ridetube](https://github.com/JustAnotherPU/ridetube) (iDrive 7), GPL-3.0-or-later; the port adds an
-iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.4.9) and Node.js 22 marked for iDrive 8.
+iDrive 8 app (`jap_ridetube8`), an iDrive 8-capable service (`jap-ridetube-d` 0.5.0) and Node.js 22 marked for iDrive 8.
 
-> **Beta: runs on an iDrive 8 car, the sound not yet.** On a car the app draws, takes touch, searches and shows
-> thumbnails, and (service 0.4.1) the car's audio manager answers and accepts the connection; the play stops because
-> that iDrive 8 does not offer the media player iDrive 7 plays OAP media with (`OapGenericMedia`). Service 0.4.2
-> asks which players the car does offer and uses one that fits; if none does, **Settings > Diagnostics** says what
-> the car has instead: photograph its pages. Reports welcome in the issues.
+> **Beta: runs on an iDrive 8 car, the sound not heard yet.** On a car the app draws, takes touch, searches and
+> shows thumbnails. That iDrive 8 does not offer the media player iDrive 7 plays OAP media with
+> (`OapGenericMedia`), so since service 0.5.0 the first play there **looks for a way to sound by itself**: first
+> the service's own player on the device of the car's audio router that the car then plays (seconds), then the
+> car's dynamic media player asked as BMW's own apps ask it (minutes). It may interrupt what is playing, the player
+> says what it is doing, and what plays is kept. If you see it playing and hear nothing: **No sound?** on the
+> player, twice. If nothing plays, **Settings > Diagnostics** has what the car answered: photograph its first
+> pages. Reports welcome in the issues.
 
 ## Install on an iDrive 8 car
 
@@ -122,6 +125,16 @@ in the issues.
 - Search opens RideTube's own keyboard, with your recent searches as buttons. Typing works only while parked; the
   recent searches work while driving.
 - The rail's **Settings** has the account (Sign in, Sign out pressed twice), **Diagnostics** and the settings.
+- **The sound** is found on the car (service 0.5.0, `native/jap-ridetube-d/sound.js`). The first play tries the
+  quick ways first: the service's own player (`ytaud` decodes, `ytalsa.py` writes to the audio router's ALSA
+  devices) on the device the car takes samples from once the audio manager has connected our source, then once a
+  dynamic media player instance has given its audio focus - which device that is, is measured by writing silence to
+  the free ones. Then the long way: the dynamic player's playlist in each of its entertainment instances - the item
+  as BMW's own SDK writes it, read from an app installed on the car (`sdkread.js`: in a child without privileges,
+  the app never runs), then other forms, places for the file and starts. The way that plays is kept in
+  `/var/opt/jap-ridetube-d/state/sound.json`; the player's **No sound?** (pressed twice) leaves a way out that
+  plays unheard, Settings' **Sound: start over** forgets all of it. Every answer of the car is on the first pages of
+  Diagnostics and in `/var/opt/jap-ridetube-d/log/sound.log`.
 - The video is decoded as a 16:9 frame as tall as the app area (1358 x 764).
 - Needs `jap-node22` with iDrive 8 in its catalog: this repository's release has it (JustAnotherPU/mgu-apps lists it
   for iDrive 7 only, so its source alone stops the install with "needs jap-node22").
@@ -208,6 +221,7 @@ One car only so far. Reports from other cars are welcome in the issues.
 | `kit/` | the idrive7-apps app kit, trimmed to the modules RideTube uses, with an iDrive 8 profile (`display.js`, `keyboard.js`) |
 | `native/jap-ridetube-d` | the service on the car: player, fetcher, account, search, thumbnails |
 | `native/ytdec` | the H.264 decoder that draws into the renderer's video layer |
+| `native/ytaud` | the AAC decoder (FAAD2, static) of the service's own player, for a head unit without a player for us |
 | `tools/release.py` | lays out the Store catalog (`catalog.json` and its assets) |
 
 ## Build and test on a computer
@@ -215,7 +229,9 @@ One car only so far. Reports from other cars are welcome in the issues.
 ```sh
 node kit/tools/test_runtime.js && node kit/tools/test_life.js && node kit/tools/test_parked.js \
   && node kit/tools/test_qr.js && node kit/tools/test_keyboard.js
-(cd native/jap-ridetube-d && node test/test_ytd.js && node test/test_thumb.js && python3.12 -I test/test_ytfetch.py)
+(cd native/jap-ridetube-d && node test/test_ytd.js && node test/test_sdkread.js && node test/test_sound.js && node test/test_thumb.js \
+  && python3.12 -I test/test_ytfetch.py && python3.12 -I test/test_ytalsa.py)
+(cd native/ytaud && sh build.sh && python3.12 -I test_ytaud.py)     # FAAD2 fetched at its pinned commit; a static libc
 (cd native/ytdec && make test && make target)     # make target needs Docker
 ```
 

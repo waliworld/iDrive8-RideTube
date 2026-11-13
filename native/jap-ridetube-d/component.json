@@ -1,10 +1,10 @@
 {
   "id": "jap-ridetube-d",
   "kind": "tool",
-  "version": "0.4.9",
+  "version": "0.5.0",
   "license": "GPL-3.0-or-later",
   "title": "RideTube service",
-  "description": "The car side of RideTube, an unofficial client for YouTube: yt-dlp (from its official release, run in mgu-python) fetches as the daemon's own internet uid; search, feeds and thumbnails on the car (jap-node22); audio through the BMW MediaPlayer, video decoded by ytdec into the mgu-render video layer; TV device sign-in; controlled by the RideTube app over /run/jap-ridetube-d/ctl.sock. iDrive 7 and iDrive 8",
+  "description": "The car side of RideTube, an unofficial client for YouTube: yt-dlp (from its official release, run in mgu-python) fetches as the daemon's own internet uid; search, feeds and thumbnails on the car (jap-node22); audio through the BMW MediaPlayer (iDrive 7), or on iDrive 8 through the way found on the car - the service's own player (ytaud, ytalsa.py) on the audio router's device the car plays, else the car's dynamic media player on the car's audio router; video decoded by ytdec into the mgu-render video layer; TV device sign-in; controlled by the RideTube app over /run/jap-ridetube-d/ctl.sock. iDrive 7 and iDrive 8",
   "requires": {
     "mgu-deploy": "0.7.0",
     "mgu-python": "1.0.2",
@@ -27,6 +27,26 @@
     {
       "path": "ytdec",
       "from": "build/ytdec",
+      "mode": "0755"
+    },
+    {
+      "path": "sound.js",
+      "from": "sound.js",
+      "mode": "0644"
+    },
+    {
+      "path": "sdkread.js",
+      "from": "sdkread.js",
+      "mode": "0644"
+    },
+    {
+      "path": "ytalsa.py",
+      "from": "ytalsa.py",
+      "mode": "0644"
+    },
+    {
+      "path": "ytaud",
+      "from": "build/ytaud",
       "mode": "0755"
     },
     {
@@ -86,7 +106,8 @@
     }
   ],
   "crashNames": [
-    "ytdec"
+    "ytdec",
+    "ytaud"
   ],
   "recmgr": [
     "jap-ridetube-d"

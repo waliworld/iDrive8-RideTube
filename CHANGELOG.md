@@ -1,5 +1,61 @@
 # Changelog
 
+## Service 0.5.0, app 0.4.6: iDrive 8, a play works through every way to sound until one plays
+
+Nobody has heard RideTube on an iDrive 8 yet, and every single guess cost its driver a trip to the car. So a play
+there no longer tries one thing: it works through every way this service knows, on its own, keeps the one that
+plays, and writes down each answer of the car (`sound.js`).
+
+- **BMW's own way of asking the car's player, read on the car** (`sdkread.js`). The apps installed on the car carry
+  the SDK's player class. The service finds such an app, and in a child process without privileges (nobody, no
+  environment, a time limit; the app itself never runs) loads that class with the bundle's own modules and runs its
+  `playlistConverter`, `createPlaylist`, `playFile` and `connect` against a recording stand-in of the player's proxy.
+  What comes back: the playlist item exactly as BMW's code writes it (its union value, its byte buffer), what
+  `getAudioFocus` is given, the heartbeat's cadence, what starts a playlist. The play uses that first. It is read
+  once and kept (`state/sdk.json`); nothing of it leaves the car but lines on the Diagnostics page.
+- **The service's own player, first** (`ytaud`, `ytalsa.py`): it needs seconds, not minutes. `ytaud` (new: FAAD2,
+  static) decodes the file and `ytalsa.py` writes the samples to the car's audio router through ALSA
+  (`plug:smartx:<device>`, libasound loaded with ctypes). The router is Intel's SmartXbar, whose source is public,
+  and it reads a device only while that device's source is connected to a loudspeaker. So which device is ours is
+  measured instead of guessed: silence is written to all the free devices named like ours at once, as the car is
+  and again once the audio manager has connected our source as on iDrive 7 - the one that takes samples as time
+  passes only then is ours, and the play goes there. Where none of those does, the router's other free devices are
+  listened to as well (never the telephone's, the navigation's, a warning's or another source's). A device another
+  program has open is never touched; who has which is read from the router's locks.
+- **The dynamic player's audio focus with our own player.** Asking that player for the focus makes the car connect
+  its source; where a device then takes samples, our samples go there - no playlist, and no file the car must read.
+  Each instance the car has for the entertainment (`Media`, `TempMedia`, `TempLumMedia`) is tried this way before
+  the long way below.
+- The player is written to what the router's source code shows: a device is opened blocking (a non-blocking open
+  tells the router not to read it), written to without blocking, started by hand, and never prepared a second time
+  (its position would be nonsense); a pause stops feeding it, a broken stream is opened anew. Every call that waits
+  for the router's answer has a time limit - its plugin has none - and each device of a listening has a process of
+  its own, so one the router never answers for, or whose plugin ends the process, costs only itself.
+- With the service's own player a pause and a resume go on in place (BMW's player has to be connected anew each
+  time); the whole file takes over from the first seconds exactly where those are; and when the car gave its sound
+  to another source meanwhile, the player says so at the resume and its way is asked for anew.
+- A way that takes samples and is still not heard may wait for a word to the audio manager: once **No sound?** was
+  said of such a way, the Diagnostics page also describes the audio manager's interfaces for players
+  (`AmPlayerState`, `AmSourceControl`), made from the unit's catalog.
+- **The dynamic media player's playlist, searched.** For each instance: the focus (the heartbeat timer's unit is
+  tried as milliseconds and as seconds), then the item in BMW's form and - where that could not be read or is
+  refused - in every other likely form, with the file where it is, as a copy in our app's data folder (where BMW's
+  apps keep what they play), as `file://`, under `/run` and as `http://127.0.0.1` from the service, and each way to
+  start a playlist (by itself, `setCurrentItemPositionAndTime`, `PLAY`, `setAutoplay`). What the player says back
+  decides what is tried next: its own words of the item, its error events, its state. A combination the service
+  died in is not tried again.
+- **"No sound?"** on the player (pressed twice) where a way was found by trying: the service leaves that way out
+  and goes on, from where the video was, with the next. Settings has **Sound: start over**.
+- While all this runs the player says so ("Finding how this car plays sound: way 3..."), also for the wait while
+  the car is still starting. The Diagnostics page begins with **Sound on this car**: what is kept, or the story of
+  the last search, a line an attempt; then **The car's sound devices**: what was listened to and what took samples,
+  every device the router has, which program has which open, and which player the car's configuration gives each
+  to; further down BMW's player code as read.
+- The player's time may come in seconds or not at all there: its unit is told by how it moves, and where it says
+  none the service counts on, so the picture has its clock.
+- The update is refused on the car (instead of a service that does not start) if the unit's Node does not load the
+  service's files (`check.sh`).
+
 ## Service 0.4.9: iDrive 8, a play during the start waits; the dynamic player is given a moment to answer
 
 0.4.8 on a car, three minutes after its start: two plays ended with "the car's audio is not ready" (the first

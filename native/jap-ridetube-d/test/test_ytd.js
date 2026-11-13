@@ -1827,7 +1827,7 @@ async function main() {
         const dq = new Daemon({ someip: sip, srcGen: root, oapRoot: path.join(root, 'oap'), catalogs: [path.join(root, 'cat.json')], generators: [gen], mainapps: [], policyDirs: [], searchRoots: [],
             procRoot: path.join(root, 'proc'), unitDirs: [], asound: path.join(root, 'asound'), ytdec: fakeYtdec, cacheDir: path.join(root, 'cache'), logDir: tmp, sock: path.join(tmp, 'ctlq.sock'), stateDir: path.join(tmp, 'stq'),
             noSetuid: true, spare: false, resume: false, fetchRetryMs: [], noHwCheck: true, accountFile: path.join(tmp, 'acctq.json'), ytRequest: fakeYt, audioConf: path.join(root, 'audio.json'),
-            playerWaitMs: 40, playerAfterMs: 60, availWaitMs: 200, dynWaitMs: 60, codeScanDelayMs: 10, log() {} });
+            playerWaitMs: 40, playerAfterMs: 60, availWaitMs: 200, dynWaitMs: 60, codeScanDelayMs: 10, codeScan: 'targeted', direct: false, log() {} });
         assert.strictEqual(dq.opts.probe, false);
         await dq.start();
         await sleep(150);
@@ -1905,87 +1905,7 @@ async function main() {
         assert.strictEqual(new Daemon({ log() {} }).opts.settleS, fs.existsSync('/usr/lib/oap-mainapp21') ? 150 : 0);
     });
 
-    await t('0.4.8, iDrive 8: a play goes through the dynamic media player as BMW\'s SDK asks it - focus, playlist (the form it takes is found and kept), PLAY; its state and time reach the daemon; pause, seek, stop', async () => {
-        const root = mkRoot('dynplay');
-        mkPlayers(root, { [MPF]: { name: 'mp', serviceId: 100, instances: { OapGenericMedia: 3 } },
-            'de_bmw_infotainment_entertainment_dynamicmediaplayer_DynamicMediaPlayer.json': { name: 'dyn', serviceId: 0xb0c0, instances: { DynamicMediaPlayerMedia: 1, DynamicMediaPlayerOverlay: 6 }, methods: { createPlaylist: {} } } });
-        const dc = [], seen = { state: [], time: [], error: [] };
-        let subs = {}, takes = 'wrapped-array', plays = true, focusOk = true;
-        const sip = { buildProxy: async (cfg, inst) => {
-            const px = await someip.buildProxy(cfg, inst);
-            if (cfg.name !== 'dyn') return Object.assign(px, { isAvailable: async () => cfg.name === 'CommandControl', callMethod: async (m, a) => { dc.push({ on: cfg.name, m: m, a: a }); return m === 'connect' ? { mainConnectionID: 5, amError: 'E_OK' } : { amError: 'E_OK' }; } });
-            const born = Date.now();     // (as on a car: a proxy answers only a moment after it is made)
-            return Object.assign(px, { isAvailable: async () => inst === 'DynamicMediaPlayerMedia' && Date.now() - born > 300, subscribe: (x) => { subs[x.name] = x.onReceive; },
-                getValue: async (n) => { if (n === 'connectionState') return 'CS_CONNECTED'; if (n === 'playerState') return 'PLAYER_STATE_STOP'; throw new Error('Unknown method name \'get:' + n + '\''); },
-                callMethod: async (m, a) => {
-                    dc.push({ on: 'dyn', m: m, a: a });
-                    if (m === 'getAudioFocus') return focusOk ? { dynMediaPlayerError: 'OK', token: 'TOK1' } : { dynMediaPlayerError: 'GENERAL_ERROR', token: '' };
-                    if (m === 'createPlaylist' && a.newPlaylist.length) {
-                        const it = a.newPlaylist[0], wrapped = typeof it.metadata[0].value === 'object', arr = Array.isArray(it.id);
-                        if (!arr && takes === 'wrapped-array') throw new Error('ByteBuffer: an array is expected');
-                        return { dynMediaPlayerError: wrapped ? 'OK' : 'BAD_ARGUMENT' };
-                    }
-                    if (m === 'sendButtonEventDirect' && a.button === 'PLAY' && a.action === 'PRESS' && plays) setTimeout(() => { subs.playerState('PLAYER_STATE_PLAY'); subs.currentItemTime({ elapsed: 500, total: 180000 }); }, 30);
-                    if (m === 'heartBeat') return {};
-                    return { dynMediaPlayerError: 'OK' };
-                } });
-        } };
-        const file = path.join(root, 'vid12345678', 'audio.m4a');
-        fs.mkdirSync(path.dirname(file)); fs.writeFileSync(file, 'x'.repeat(1234));
-        const a = new Audio({ someip: sip, srcGen: root, oapRoot: path.join(root, 'oap'), audioConf: path.join(root, 'audio.json'), playerWaitMs: 40, playerAfterMs: 60, availWaitMs: 200,
-            dynClientId: 'jap_ridetube8', dynHeartbeatTimer: 10000, dynHeartbeatMs: 40, dynStartMs: 1200, log() {} },
-            { state: (v) => seen.state.push(v), time: (v) => seen.time.push(v), error: (v) => seen.error.push(v) });
-        await a.start();
-        await a.play(file);
-        const dyn = () => dc.filter((c) => c.on === 'dyn' && c.m !== 'heartBeat');
-        assert.deepStrictEqual(dyn().map((c) => c.m), ['getAudioFocus', 'createPlaylist', 'createPlaylist', 'sendButtonEventDirect', 'sendButtonEventDirect']);
-        assert.deepStrictEqual(dyn()[0].a, { clientId: 'jap_ridetube8', clientName: 'RideTube', timeOutHeartBeatTimer: 10000 });
-        assert.deepStrictEqual(dyn()[2].a, { token: 'TOK1', newPlaylist: [{ pos: 1, id: Array.prototype.slice.call(Buffer.from('vid12345678')), metadata: [{ key: 'FILE_NAME', value: { stringValue: file } }, { key: 'FILE_SIZE', value: { numeric: 1234 } }] }] });
-        assert.deepStrictEqual(dyn().slice(3).map((c) => c.a), [{ token: 'TOK1', button: 'PLAY', action: 'PRESS' }, { token: 'TOK1', button: 'PLAY', action: 'RELEASE' }]);
-        assert.deepStrictEqual(dc.filter((c) => c.on === 'CommandControl'), [], 'the audio manager is not asked: the dynamic player has its own focus');
-        assert.deepStrictEqual(seen.state, ['PLAYER_STATE_PLAY']);
-        assert.deepStrictEqual(seen.time, [{ elapsed: 500, total: 180000 }]);
-        assert.strictEqual(a.diag.dynPlay.enc, 'wrapped values, id as an array');
-        assert.strictEqual(a.diag.dynPlay.error, null);
-        assert.ok(/^createPlaylist \(wrapped values, id as a Buffer\) failed ByteBuffer: an array is expected$/.test(a.diag.dynPlay.steps[2]), a.diag.dynPlay.steps.join(' | '));
-        await sleep(120);
-        assert.ok(dc.filter((c) => c.m === 'heartBeat').length >= 2 && dc.filter((c) => c.m === 'heartBeat')[0].a.token === 'TOK1', 'the focus is kept alive');
-        // pause, seek, the same file again (the form that worked first), stop
-        dc.length = 0;
-        await a.button('PAUSE');
-        await a.seek(42000);
-        await a.replay(file);
-        assert.deepStrictEqual(dyn().map((c) => c.m + (c.a.button ? ' ' + c.a.button + ' ' + c.a.action : '')), ['sendButtonEventDirect PAUSE PRESS', 'sendButtonEventDirect PAUSE RELEASE', 'setCurrentItemPositionAndTime',
-            'createPlaylist', 'sendButtonEventDirect PLAY PRESS', 'sendButtonEventDirect PLAY RELEASE']);
-        assert.deepStrictEqual(dyn()[2].a, { token: 'TOK1', newPosition: 1, newTimeElapsed: 42000 });
-        dc.length = 0;
-        await a.release();
-        assert.deepStrictEqual(dyn().map((c) => c.m + (c.a.button ? ' ' + c.a.button : '') + (c.a.newPlaylist ? ' ' + c.a.newPlaylist.length : '')),
-            ['sendButtonEventDirect STOP', 'sendButtonEventDirect STOP', 'createPlaylist 0', 'releaseAudioFocus']);
-        dc.length = 0;
-        await sleep(120);
-        assert.deepStrictEqual(dc, [], 'no beat once the focus is given back');
-        subs.playerState('PLAYER_STATE_STOP');
-        assert.deepStrictEqual(seen.state.length, 2, 'after the release the daemon no longer hears it');
-        await a.release();
-        // it takes the file and does not play: the position is set, PLAY once more, then the reason - and nothing left behind
-        plays = false;
-        dc.length = 0;
-        await assert.rejects(a.play(file), /^Error: the car's dynamic player took the file but does not play it \(Settings > Diagnostics\)$/);
-        assert.deepStrictEqual(dyn().map((c) => c.m), ['getAudioFocus', 'createPlaylist', 'sendButtonEventDirect', 'sendButtonEventDirect', 'setCurrentItemPositionAndTime', 'sendButtonEventDirect', 'sendButtonEventDirect', 'createPlaylist', 'releaseAudioFocus']);
-        assert.strictEqual(a.connId, null);
-        assert.strictEqual(a.diag.dynPlay.error, 'took the file but does not play it');
-        // no focus given
-        focusOk = false; dc.length = 0;
-        await assert.rejects(a.play(file), /^Error: the car's dynamic player gave no audio focus \(GENERAL_ERROR\) \(Settings > Diagnostics\)$/);
-        assert.deepStrictEqual(dyn().map((c) => c.m), ['getAudioFocus']);
-        // switched off: iDrive 7's way and its error
-        a.opts.dynamic = false; dc.length = 0;
-        await assert.rejects(a.play(file), /playFile/);
-        assert.deepStrictEqual(dyn(), []);
-        assert.deepStrictEqual(dc.filter((c) => c.on === 'CommandControl').map((c) => c.m), ['connect']);
-        await a.release();
-    });
+    // (a play on a head unit without iDrive 7's player - the search for a way to sound - has its own tests: test_sound.js)
 
     await t('a daemon whose audio never comes up: a play ends with the reason (not "audio service timed out"), diag says NOT READY, the start goes on trying', async () => {
         const silent = { buildProxy: async (cfg, inst) => Object.assign(await someip.buildProxy(cfg, inst), { isAvailable: async () => false }) };

@@ -257,8 +257,9 @@ mgu.run({
                         } }
                         : { label: 'Sign in', run: () => { show('home'); model.authStart(true); return 'close'; } },
                     { label: 'Diagnostics', run: () => { openDiag(); return null; } },
+                ].concat(model.snd ? [{ label: 'Sound: start over', run: () => { model.soundReset(); return 'close'; } }] : [], [
                     { label: 'Settings', primary: true, run: () => { ctx.sheet(listSheet(settings, null, { version: mgu.SPEC.version })); return null; } },
-                ],
+                ]),
             }));
         }
         // Settings > Diagnostics: what the app and its service say about this head unit, as pages of text to read or
@@ -307,7 +308,7 @@ mgu.run({
         }
         const shownAt = () => Math.max(0, Math.min(model.total > 0 ? model.total : Infinity, model.elapsed + pend));
         // preparing: its percentage, or the network lost and the daemon trying again
-        const prepText = () => (model.retry ? 'No connection - trying again (' + model.retry + ')...' : 'Preparing... ' + Math.round(model.pct || 0) + ' %');
+        const prepText = () => (model.retry ? 'No connection - trying again (' + model.retry + ')...' : model.note ? model.note : 'Preparing... ' + Math.round(model.pct || 0) + ' %');
         // a failed play: Try again (the same video, the queue kept)
         const again = () => { if (model.id) play(model.id, model.item(model.id)); };
         /* ---------- SponsorBlock: per category Skip, a Skip button (ask) or Off (Settings) ---------- */
@@ -790,7 +791,8 @@ mgu.run({
          * the page's px (dx, dy). Hidden, the same keys cover the whole screen and only show it again (the
          * controller stays on its key, so a turn or a press wakes it; a tap anywhere too).
          */
-        const OVK = ['ov:back', 'ov:qr', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'];
+        const OVK = ['ov:back', 'ov:qr', 'ov:snd', 'ov:rw', 'ov:play', 'ov:ff', 'ov:q', 'ov:zoom', 'ov:bar'];
+        let sndArmed = 0;       // "No sound?" pressed once: a second press within 6 s says it
         // podcast mode (driving): artwork, title, chapter, the bar with chapter ticks and skipped segments, controls
         // a glove can hit (-10 s, play/pause, +10 s, next in the row), the next video, a skipped-sponsor notice
         function drawPodcast(cv, SW, SH, LX, tg, run, live) {
@@ -960,6 +962,18 @@ mgu.run({
                     if (fl) cv.fillRect(zx - 22, cy - 15, 44, 30, c); else cv.fillRect(zx - 12, cy - 15, 24, 30, c);
                 });
                 cv.text(fl ? 'Unzoom' : 'Zoom', zx, cy + 76, 22, '#dddddd', { literal: true, align: 'center' });
+                // left, where the service plays through a way it found by trying (iDrive 8): "No sound?" - pressed
+                // twice, the service leaves that way out and goes on with the next
+                if (model.snd && model.snd.route) {
+                    const sx = LX + 150, armed = sndArmed > Date.now();
+                    ctl('ov:snd', sx, cy, 42, () => { if (sndArmed > Date.now()) { sndArmed = 0; model.noSound(); } else sndArmed = Date.now() + 6000; }, (c) => {
+                        cv.fillRect(sx - 20, cy - 8, 10, 16, c);
+                        cv.quad([[sx - 11, cy - 8], [sx + 2, cy - 19], [sx + 2, cy + 19], [sx - 11, cy + 8]], c);
+                        cv.polyline([[sx + 9, cy - 9], [sx + 23, cy + 9]], 4, c);
+                        cv.polyline([[sx + 23, cy - 9], [sx + 9, cy + 9]], 4, c);
+                    });
+                    cv.text(armed ? 'Press again: try another way' : 'No sound?', armed ? LX + 90 : sx, cy + 76, 22, armed ? '#ffd27a' : '#dddddd', { literal: true, align: armed ? 'left' : 'center' });
+                }
             } else if (model.state === 'error' && model.id && model.connected) {
                 ctl('ov:play', cx, cy, 58, again, (c) => retryGlyph(cv, cx, cy, 26, c));
                 cv.text('Try again', cx, cy + 100, 26, '#dddddd', { literal: true, align: 'center' });

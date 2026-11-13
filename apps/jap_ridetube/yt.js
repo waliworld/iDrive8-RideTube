@@ -108,6 +108,8 @@ class Model {
         this.chans = null;           // the subscribed channels: {items:[{id,title,handle}], loading, error, t}
         this.chan = null;            // the channel page shown: {id, title, items, shelves, loading, error, t}
         this.diag = null;            // the service's diagnostics, once asked: {lines, version, ready, t} (askDiag)
+        this.note = null;            // what the service says it is doing while a play prepares (its 'note' events)
+        this.snd = null;             // iDrive 8: the way to sound the service found by trying: {route, name, kept, silent}
         this.rev = 0;                // bumped on every change the screens show
     }
     active() { return ACTIVE.indexOf(this.state) >= 0; }
@@ -145,7 +147,9 @@ class Model {
             const t = m.title === undefined ? '' : String(m.title || '');
             if (t && (t !== this.id || !this.title)) this.title = t;
             if (this.state !== 'error') this.error = null;
-            if (this.state !== 'preparing') this.retry = 0;
+            if (this.state !== 'preparing') { this.retry = 0; this.note = null; }
+            // the way to sound the service found by trying (iDrive 8): while it plays the player offers "No sound?"
+            if (m.snd !== undefined) this.snd = m.snd && typeof m.snd === 'object' ? m.snd : null;
             if (this.state === 'idle' || (was !== 'preparing' && this.state === 'preparing')) { this.elapsed = 0; this.total = 0; }
             // a fresh ytdec starts with video on: tell it again where we are
             if (this.state === 'playing' && was !== 'playing' && was !== 'paused') { this.videoOn = null; this._video(); }
@@ -190,6 +194,9 @@ class Model {
         } else if (m.ev === 'extras') {
             this.extras = { id: String(m.id), chapters: (Array.isArray(m.chapters) ? m.chapters : []).filter((c) => Array.isArray(c) && c[0] >= 0),
                 segments: (Array.isArray(m.segments) ? m.segments : []).filter((c) => Array.isArray(c) && c[1] > c[0]) };
+        } else if (m.ev === 'note') {
+            // what the service is doing while a play prepares (its search for a way to sound takes a while)
+            this.note = this.state === 'preparing' && m.msg ? String(m.msg).slice(0, 120) : null;
         } else if (m.ev === 'retry') {
             if (m.id === this.id) this.retry = Number(m.n) || 1;   // the fetch failed (the network): the daemon tries again
         } else if (m.ev === 'skipped') {
@@ -237,6 +244,10 @@ class Model {
     /** a stream lookup ahead of a likely play (the daemon skips cached and fresh ones) */
     /** ask the service for its diagnostics (model.diag once it answers) */
     askDiag() { return this.send({ cmd: 'diag' }); }
+    /** the driver hears nothing: the service leaves the way it plays through out and goes on with the next */
+    noSound() { return this.send({ cmd: 'nosound' }); }
+    /** the service forgets what it found and left out: the next play tries every way again */
+    soundReset() { return this.send({ cmd: 'soundreset' }); }
     prefetch(id) { return this.connected && this._known(id) ? this.send({ cmd: 'prefetch', id }) : false; }
     /** the screens draw item id: its thumb asked once (until it comes, or the item goes), if not held; true when asked now */
     wantThumb(id) {
@@ -265,7 +276,7 @@ class Model {
     /** o: { quality, skip } (the settings), sent as they are */
     play(id, rect, fill, it, o) {
         const r = it || this.item(id);
-        this.id = id; this.title = r ? String(r.title || '') : ''; this.channel = r ? String(r.channel || '') : ''; this.state = 'preparing'; this.pct = 0; this.elapsed = 0; this.total = 0; this.error = null; this.retry = 0;
+        this.id = id; this.title = r ? String(r.title || '') : ''; this.channel = r ? String(r.channel || '') : ''; this.state = 'preparing'; this.pct = 0; this.elapsed = 0; this.total = 0; this.error = null; this.retry = 0; this.note = null;
         this._changed();
         // the account's own resume point (the tile's), used by the daemon when this car never played it
         return this.send(Object.assign({ cmd: 'play', id, rect, fill: !!fill }, r && r.start_s > 0 ? { at: r.start_s * 1000 } : {}, o || {}));

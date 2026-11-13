@@ -2,12 +2,13 @@
 # Builds this repository's MGU Store release in dist/release/ (catalog.json and its assets), for the GitHub release
 # tagged "catalog" of waliworld/iDrive8-RideTube:
 #   jap_ridetube8    RideTube for iDrive 8, as a source package the head unit builds (kit/tools/build.py --hmi ID8)
-#   jap-ridetube-d   its service (packed here; ytdec and ytdlp.pyz as in JustAnotherPU's release 0.3.9, checked below)
+#   jap-ridetube-d   its service (packed here; ytdec and ytdlp.pyz as in JustAnotherPU's release 0.3.9, checked below;
+#                    ytaud built here from native/ytaud and FAAD2)
 #   jap-node22       Node.js 22 for the service (packed here from tools/jap-node22; the binary as in JustAnotherPU/mgu-apps)
 # Usage: MGU_STORE=<a clone of github.com/robertnisipeanu/mgu-store> tools/release_id8.sh
 # The prebuilt binaries are taken from JustAnotherPU's published releases and checked against the sha256 pinned here
 # (to build them yourself instead: native/ytdec "make target" with Docker, native/jap-ridetube-d/tools/build_pyz.sh,
-# tools/jap-node22/build.sh). Needs curl, tar, node, python3.
+# tools/jap-node22/build.sh). Needs curl, tar, node, python3, git, gcc with a static libc, ffmpeg.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 : "${MGU_STORE:?set MGU_STORE to a clone of github.com/robertnisipeanu/mgu-store (its deploy/hu packs the tool kits)}"
@@ -56,7 +57,12 @@ node kit/tools/test_runtime.js >/dev/null && node kit/tools/test_keyboard.js >/d
 node kit/tools/test_ridetube8.js >/dev/null
 # the source package built with the Store's own linker, as on the head unit, and started against a fake iDrive 8
 MGU_STORE="$MGU_STORE" node kit/tools/test_mgu8.js | tail -1 | grep -q '^mgu8: all ok$' || { echo "release_id8.sh: kit/tools/test_mgu8.js did not pass (or was skipped)" >&2; exit 1; }
-(cd "$d" && node test/test_ytd.js >/dev/null && node test/test_thumb.js >/dev/null)
+# ytaud, the AAC decoder of the service's own player (iDrive 8 without the car's player): built here from ytaud.c and
+# FAAD2 at its pinned commit, static (native/ytaud/build.sh), then tested against ffmpeg's decoder
+sh "$root/native/ytaud/build.sh" "$d/build/ytaud"
+python3 -I "$root/native/ytaud/test_ytaud.py" "$d/build/ytaud" >/dev/null || { echo "release_id8.sh: native/ytaud/test_ytaud.py did not pass" >&2; exit 1; }
+(cd "$d" && node test/test_ytd.js >/dev/null && node test/test_sdkread.js >/dev/null && node test/test_sound.js >/dev/null && node test/test_thumb.js >/dev/null)
+python3 -I "$d/test/test_ytalsa.py" >/dev/null || { echo "release_id8.sh: test_ytalsa.py did not pass" >&2; exit 1; }
 node tools/test_id8_collect.js >/dev/null
 
 node "$MGU_STORE/deploy/hu" artifact "$d" --out "$d/dist"

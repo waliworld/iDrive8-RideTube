@@ -66,6 +66,36 @@ Every internet request runs as the daemon's fetch uid (below, "Internet: the fet
   resamples to 320x180 if needed and writes 230400 bytes RGBA on stdout. DNS: the uplink lease's
   servers (`--lease`, default `/run/mgu-uplink/lease.json`), else the system resolver.
 
+## Sound on iDrive 8 (0.5.0, `sound.js`)
+
+iDrive 8 has no `OapGenericMedia` player, and which way plays a file there is not known yet. So a play
+on such a car works through the ways, the quick ones first, and keeps the first that plays
+(`state/sound.json`; a new version of the service starts over). Nothing here is confirmed on a car.
+
+- The car's audio router is Intel's SmartXbar (its source and that of its ALSA plugin, AVB-AudioModules, are
+  public). A device of it (`smartx:<name>`: a ring buffer in `/dev/shm`, a lock and a wake-up pipe in
+  `/run/smartx`) is read only while its source is connected to a sink. `ytalsa.py probe` lists the devices from
+  those files without opening any, with the program that has each open; `ytalsa.py scan` writes silence to all the
+  free ones at once, each in a process of its own, and says which take it as time passes.
+- `DirectRoute` (`direct:<device>`): the service's own player. The devices are scanned as the car is and again
+  with our source connected by the audio manager (`connect`, as on iDrive 7); on one that then takes samples,
+  `ytaud` (`../ytaud`, FAAD2, static) decodes the AAC as `nobody` and `ytalsa.py play` writes it and reports the
+  time. Where none of the devices named like ours does, the router's other free devices are scanned too.
+- `FocusRoute` (`focus:<instance>|<device>`): the audio focus of a DynamicMediaPlayer instance (`getAudioFocus`,
+  kept alive by `heartBeat`) makes the car connect that player's source; the scan again, and the same player on a
+  device that then takes samples.
+- `DynRoute` (`dyn:<instance>`): the instance's playlist. `createPlaylist` in each form (BMW's own first) with the
+  file in each place (its path, the app's `data` folder, `file://`, `/run`, a local HTTP server), then each way to
+  start it. A way counts once the player says PLAY or its time moves. Minutes.
+- `sdkread.js` reads, on the car, how BMW's own SDK asks the dynamic player: it loads an installed app's player
+  class in a `vm` sandbox with every dependency replaced by a recording stub, in a child running as `nobody` with
+  no environment, and records the item it builds, the arguments of `getAudioFocus`, the heartbeat and what starts a
+  playlist. The result stays on the car (`state/sdk.json`, the Diagnostics page). No BMW code is in this repository.
+- The driver's verdict: the app's "No sound?" (`nosound`) marks the way that claims to play as silent and the same
+  video goes on with the next way.
+- `ytalsa.py` and the router: a device is opened blocking, written to non-blocking, started by hand, never prepared
+  twice; no call that waits for the router is made without a time limit (a thread ends the process past it).
+
 ## Updating yt-dlp
 
 `ytdlp.pyz` is built from the official yt-dlp zipapp of a pinned GitHub release
@@ -108,8 +138,12 @@ App → daemon:
 | `{"cmd":"sign_out"}` | deletes the account → `auth` `signed_out` |
 | `{"cmd":"feed","which":"home\|subs\|wl"}` | → `feed` (items, or error `signed out` / `feed offline` / `unknown feed`) |
 | `{"cmd":"diag"}` | → `diag`: `{"ev":"diag","version","ready","lines":[..]}`, the app's Settings > Diagnostics page (lines of text, `# ` starts a section: the sound's start and what the car answered, the files, the picture, the log's last lines) |
+| `{"cmd":"nosound","id":"..","rect":"WxH","fill":bool}` | iDrive 8: the way that plays now gave no sound: it is left out and the same video goes on with the next way, from where it was |
+| `{"cmd":"soundreset"}` | iDrive 8: forgets the way kept and the ways left out → `state` |
 
-Daemon → app: `{"ev":"state","state":"idle|preparing|playing|paused|ended|error","pct","id","title","buffering"}`,
+Daemon → app: `{"ev":"state","state":"idle|preparing|playing|paused|ended|error","pct","id","title","buffering","snd"}`
+(`snd`, iDrive 8 once a play was tried: `{route, name, kept, silent}`),
+`{"ev":"note","msg"}` (a line for the preparing screen: what the search for sound is trying),
 `{"ev":"time","elapsed","total"}` (ms, ≤ 4/s), `{"ev":"results","q","items":[{id,title,channel,duration_s,meta?}]}` (`meta: ["12K views"]` when there is a view count),
 `{"ev":"thumb","id","w","h","rgba":"<base64 w*h*4 bytes>"}` (320x180; 160x90 from caches older than 0.1.6; the size comes from the length; a 320x180 line is ~307 kB), `{"ev":"error","msg"}`,
 `{"ev":"auth","state":"signed_out|code|signed_in|error","code","url","expires" (s left, with code),"msg" (with error)}`,
@@ -196,16 +230,27 @@ starts node with `--max-http-header-size=65536`: the TV page's headers pass 8 kB
   list what was watched. Each video's folder is 0711: BMW's media engine (its own uid) opens the audio in it by
   name, and nobody can list it. The thumbnail folder is 0700 and `positions.json` (where each video was left, the
   watch history) 0600. The account tokens live in `state/` (0700).
+- iDrive 8 (0.5.0): BMW's player code is run only inside `sdkread.js`'s sandbox, in a child as `nobody` with no
+  environment, every dependency a stub, 12 s at most; it can reach neither the car's services nor the network
+  from there. `ytaud` parses the downloaded file as `nobody` too. `ytalsa.py` runs as root (it opens the sound
+  devices) and reads only the decoder's pipe. A scan writes silence only, to devices no program has open, and
+  never to one named for the telephone, the navigation, a warning or another source. To let the media engine open the audio, a copy under a random name
+  is put in the app's `data` folder or `/run/jap-ridetube-d/media` (0644), or served on 127.0.0.1 under a random
+  path, for the time of the play.
 
 ## Build and test
 
+    node test/test_sdkread.js       # the reader of the SDK's player code, against a made-up bundle (test/fake_sdk_bundle.js)
+    node test/test_sound.js         # the search for sound, against a made-up car (test/fake_car.js, test/fake_ytalsa.js)
+    python3 -I test/test_ytalsa.py  # a stand-in libasound that behaves as the router's plugin does (test/fake_asound.c: needs cc); the real `null` device and ytaud when present
     node test/test_ytd.js           # fake someip, fake ytdec, fake fetcher, fake youtube.com
     node test/test_thumb.js         # Node 22+: ffmpeg-made JPEGs (baseline, resampled, progressive via jpegtran); online part skipped offline
     python3.12 -I test/test_ytfetch.py   # ffmpeg fixtures, local Range server (head MP4, ranged == one stream); online part skipped offline
     MGU_STORE=... ./build.sh [path/to/ytdec]   # → dist/jap-ridetube-d@<version>.tgz (default ../ytdec/build/target/ytdec)
 
 `build.sh`: checks ytdec is an x86-64 ELF, runs `tools/build_pyz.sh` (→ `build/ytdlp.pyz`),
-`tools/vendor_jpeg.sh` when `vendor/jpeg-js/` is missing, the three tests, copies ytdec into `build/`,
+`tools/vendor_jpeg.sh` when `vendor/jpeg-js/` is missing, builds `ytaud` (`../ytaud/build.sh`: git, a C compiler
+and a static libc), runs the tests, copies ytdec into `build/`,
 then packs with the MGU Store's `deploy/hu artifact` (`MGU_STORE`; `SOURCE_DATE_EPOCH`: the last commit).
 `tools/vendor_jpeg.sh` fetches the pinned jpeg-js tarball (BSD-3-Clause) from the npm registry,
 checks its sha512 and keeps only `lib/decoder.js` and `LICENSE`.
