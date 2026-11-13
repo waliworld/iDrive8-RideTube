@@ -6,6 +6,7 @@ Standard library only; needs cc."""
 import array
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -236,7 +237,10 @@ shm, run, conf, am = (os.path.join(tmp, n) for n in ('shm', 'run', 'conf', 'am')
 for d in (shm, run, conf, am):
     os.mkdir(d)
 for n in ('smartx_OAPMedia_clocked_p_ringbuffer', 'smartx_Dynamic_stall_p', 'smartx_Mic_c_ringbuffer', 'smartx_Entertainment_clocked_p_ringbuffer', 'smartx_TelRing_Outband_CF_24_MONO_p_ringbuffer', 'other',
-          'smartx_Out3_CF_48_STEREO_p_ringbuffer', 'smartx_CarPlayMain_CF_48_STEREO_p_ringbuffer', 'smartx_PDC_Front_p_ringbuffer', 'smartx_Zone1_p_ringbuffer', 'smartx_Zone1_c_ringbuffer'):
+          'smartx_Out3_CF_48_STEREO_p_ringbuffer', 'smartx_CarPlayMain_CF_48_STEREO_p_ringbuffer', 'smartx_PDC_Front_p_ringbuffer', 'smartx_Zone1_p_ringbuffer', 'smartx_Zone1_c_ringbuffer',
+          # (as on the car: other sources' media devices, and the call and speech devices - none of them ours, none to be touched)
+          'smartx_CarLifeMedia_CF_48_STEREO_p_ringbuffer', 'smartx_AndroidAutoMedia_CF_48_STEREO_p_ringbuffer', 'smartx_Voip_Physical_Source_CF_24_MONO_p_ringbuffer',
+          'smartx_eSimCallSource_CF_24_MONO_p_ringbuffer', 'smartx_Nuance_physical_Source_CF_24_MONO_p_ringbuffer', 'avb_Amp_Front_p_ringbuffer'):
     open(os.path.join(shm, n), 'w').close()
 for n in ('smartx_OAPMedia_clocked_p.lock', 'smartx_Entertainment_clocked_p.lock', 'smartx_Mic_c.lock'):
     open(os.path.join(run, n), 'w').close()
@@ -247,14 +251,33 @@ other.stdout.readline()
 open(os.path.join(conf, 'mediaengine_config_hu.xml'), 'w').write('<player name="OnlineEntertainmentComponent_1"><p dev="plug:smartx:OnlineX_busy"/></player><p dev="smartx:OAPMedia_RSE_L"/>'
                                                               '<player name="OapGenericMedia"><sink rate="48000"><p dev="plug:smartx:Out7_clocked"/></sink></player>')
 open(os.path.join(am, 'DOMAIN_MGU.bin'), 'wb').write(b'\x00\x01OAPGenericMedia\x00\x10VOL_OAP_INTERRUPT_MAX\x00DynamicInterrupt\x00Dyn_nofmtDynamic\x00')
+proc, asound = os.path.join(tmp, 'proc'), os.path.join(tmp, 'proc', 'asound')
+os.makedirs(os.path.join(asound, 'card0', 'pcm3p', 'sub0'))
+os.makedirs(os.path.join(asound, 'card0', 'pcm3p', 'sub1'))
+os.makedirs(os.path.join(proc, '4103', 'fd'))
+open(os.path.join(asound, 'cards'), 'w').write(' 0 [aplmgu         ]: aplmgu - aplmgu\n')
+open(os.path.join(asound, 'pcm'), 'w').write('00-03: Media : Media : playback 1\n')
+open(os.path.join(asound, 'card0', 'pcm3p', 'sub0', 'status'), 'w').write('state: RUNNING\nowner_pid   : %d\ntrigger_time: 1.2\n' % other.pid)
+open(os.path.join(asound, 'card0', 'pcm3p', 'sub0', 'hw_params'), 'w').write('access: RW_INTERLEAVED\nformat: S16_LE\nchannels: 2\nrate: 48000 (48000/1)\n')
+open(os.path.join(asound, 'card0', 'pcm3p', 'sub1', 'status'), 'w').write('closed\n')
+open(os.path.join(proc, '4103', 'comm'), 'w').write('mediaengine\n')
+open(os.path.join(proc, '4103', 'cmdline'), 'w').write('mediaengine\0-c\0/etc/mediaconfig/mediaengine_config_hu.xml\0')
+open(os.path.join(proc, '4103', 'maps'), 'w').write('7f00-7f01 rw-s 0 00:13 5 /dev/shm/smartx_Entertainment_clocked_p_ringbuffer\n7f02-7f03 r-xp 0 08:01 9 /usr/lib/libasound.so.2.0.0\n'
+                                                       '7f04-7f05 r-xp 0 08:01 9 /usr/lib/alsa-lib/libasound_module_pcm_smartx.so\n7f06-7f07 r-xp 0 08:01 9 /lib/libc.so.6\n')
+os.symlink('/dev/snd/pcmC0D3p', os.path.join(proc, '4103', 'fd', '7'))
+os.symlink('/dev/snd/timer', os.path.join(proc, '4103', 'fd', '8'))
+mc = os.path.join(tmp, 'etc', 'mediaconfig')
+os.makedirs(mc)
+os.rename(os.path.join(conf, 'mediaengine_config_hu.xml'), os.path.join(mc, 'mediaengine_config_hu.xml'))
+ac = os.path.join(tmp, 'etc', 'asound.conf')
+open(ac, 'w').write('pcm.entertainment_main {\n  type hw\n  card aplmgu\n  device 3\n}\npcm.dmix { type dmix }\n')
 open(log, 'w').close()
-p = subprocess.run([sys.executable, '-I', ytalsa, 'probe', '--shm', shm, '--run', run, '--conf', conf, '--am', am, '--alsa-lib', lib], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, FAKE_ASOUND_LOG=log))
+p = subprocess.run([sys.executable, '-I', ytalsa, 'probe', '--shm', shm, '--run', run, '--conf', conf, '--conf', mc, '--conf', ac, '--am', am, '--proc', proc, '--asound', asound, '--alsa-lib', lib], stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, FAKE_ASOUND_LOG=log))
 res = json.loads(p.stdout)
 names = [(d['name'], d['sure']) for d in res['devices']]
 comm = open('/proc/%d/comm' % other.pid).read().strip()
 check('probe: the devices named like ours, those the router surely has first, then the likeliest; the telephone\'s, the microphone\'s, the rear seats\' are not among them',
-      names == [('plug:smartx:OAPMedia_clocked', 2), ('plug:smartx:Dynamic_stall', 2), ('plug:smartx:Entertainment_clocked', 2), ('plug:smartx:OnlineX_busy', 1), ('plug:smartx:Out7_clocked', 1),
-                ('plug:smartx:OAPGenericMedia', 0), ('plug:smartx:Dyn_nofmtDynamic', 0)]
+      names == [('plug:smartx:OAPMedia_clocked', 2), ('plug:smartx:Dynamic_stall', 2), ('plug:smartx:Entertainment_clocked', 2), ('plug:smartx:OnlineX_busy', 1), ('plug:smartx:Out7_clocked', 1)]
       and res['shm'] == sorted(n for n in os.listdir(shm) if n.startswith('smartx')), names)
 ent = [d for d in res['devices'] if d['name'] == 'plug:smartx:Entertainment_clocked'][0]
 check('  ... who has a device open now is read from the router\'s lock on it (never taken)', ent.get('held') == '%s (%d)' % (comm, other.pid) and not any('held' in d for d in res['devices'] if d is not ent)
@@ -262,8 +285,19 @@ check('  ... who has a device open now is read from the router\'s lock on it (ne
 check('  ... which player a configuration gives a device to is read with it: a device with a name that says nothing is found by its player\'s',
       res['map'] == ['OAPMedia_RSE_L: OnlineEntertainmentComponent_1', 'OnlineX_busy: OnlineEntertainmentComponent_1', 'Out7_clocked: OnlineEntertainmentComponent_1, OapGenericMedia'], res['map'])
 check('  ... the router\'s other devices - names that say nothing, free, not the telephone\'s, a warning\'s or another source\'s - are listed apart: listened to only when none of ours plays',
-      res['others'] == ['plug:smartx:Out3_CF_48_STEREO', 'plug:smartx:Zone1'], res['others'])
+      res['others'] == ['plug:smartx:Out3_CF_48_STEREO', 'plug:smartx:Zone1'] and not any(re.search('CarLife|AndroidAuto|Voip|eSim|Nuance', d['name']) for d in res['devices']), (res['others'], res['devices']))
 check('  ... and nothing was opened', open(log).read() == '', open(log).read())
+# the plumbing: who has what, read from /proc and the configuration
+pl = res.get('plumbing') or {}
+check('the plumbing: every buffer there is (the amplifier\'s too), the program that has one mapped or a kernel device open, the streams in use, the configuration\'s devices and the media engine\'s words',
+      'avb_Amp_Front_p' in pl.get('shm', []) and 'smartx_OAPMedia_clocked_p' in pl['shm']
+      and pl['cards'] == ['0 [aplmgu ]: aplmgu - aplmgu'] and pl['pcm'] == ['00-03: Media : Media : playback 1']
+      and pl['used'] == ['card0/pcm3p/sub0 RUNNING by %s (%d), 48000 Hz 2 ch' % (comm, other.pid)]
+      and pl['snd'] == ['mediaengine (4103): pcmC0D3p'] and pl['maps'] == ['mediaengine (4103): smartx_Entertainment_clocked_p']
+      and pl['pcms'] == ['entertainment_main=hw card aplmgu device 3'] and any(w.startswith('plug:smartx:Out7_clocked <- ') and w.endswith('OapGenericMedia') for w in pl['words'])
+      and any(w.startswith('[OapGenericMedia in mediaengine_config_hu.xml] OapGenericMedia"><sink rate="48000">') for w in pl['words'])
+      and pl['libs'] == ['mediaengine (4103) [mediaengine -c /etc/mediaconfig/mediaengine_config_hu.xml]: libasound, libasound_module_pcm_smartx']
+      and pl['files'][0].startswith('mediaengine_config_hu.xml ('), pl)
 other.kill()
 
 # ---- scan: silence to every device at once, which of them take it as time passes

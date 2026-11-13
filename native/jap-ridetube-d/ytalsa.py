@@ -137,10 +137,17 @@ class Alsa:
         a.snd_strerror.restype = ctypes.c_char_p
         # libasound prints its own errors to stderr (a device that does not exist is three lines): kept quiet,
         # what failed is said in our own lines
+        self.said = ''             # the last of them: which step of a call failed (its text, the numbers not filled in)
         try:
-            self._quiet = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ci, ctypes.c_char_p, ci, ctypes.c_char_p)(lambda *_: None)
+            self._quiet = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ci, ctypes.c_char_p, ci, ctypes.c_char_p)(self.heard)
             a.snd_lib_error_set_handler(self._quiet)
         except Exception:  # an ALSA without it: its lines go to stderr
+            pass
+
+    def heard(self, file, line, function, err, fmt):
+        try:
+            self.said = ('%s: %s' % ((function or b'?').decode('ascii', 'replace'), (fmt or b'').decode('ascii', 'replace')))[:160]
+        except Exception:
             pass
 
     def err(self, code):
@@ -161,13 +168,14 @@ class Alsa:
             raise OSError(-r, self.err(r))
         try:
             last = 0
+            self.said = ''
             with guard('setting up ' + name, 6):
                 for latency in (200000, 500000, 100000, 50000, 1000000):
                     last = self.a.snd_pcm_set_params(pcm, S16_LE, RW_INTERLEAVED, channels, rate, 1, latency)
                     if last >= 0:
                         break
             if last < 0:
-                raise OSError(-last, 'takes no %d Hz %d-channel sound: %s' % (rate, channels, self.err(last)))
+                raise OSError(-last, 'takes no %d Hz %d-channel sound: %s%s' % (rate, channels, self.err(last), ' [%s]' % self.said if self.said else ''))
             buf, per = ctypes.c_ulong(0), ctypes.c_ulong(0)
             if self.a.snd_pcm_get_params(pcm, ctypes.byref(buf), ctypes.byref(per)) < 0:
                 buf.value, per.value = rate // 5, rate // 20
@@ -207,9 +215,10 @@ class Alsa:
 
 OURS = re.compile(r'oap|generic|dynamic|online|media|entertain|browser|video|stream|music|player', re.I)
 NOT_OURS = re.compile(r'rse|rear|interrupt|overlay|vol_|ratio|sink|capture|_c$|(?:^|_)mic(?:_|$)|microphone|'
-                      r'tel|ring|phone|hfp|nav|tts|sds|speech|voice|pdc|park|gong|chime|warn|ecall|emergency|alert|service', re.I)
+                      r'tel|ring|phone|hfp|nav|tts|sds|speech|voice|pdc|park|gong|chime|warn|ecall|emergency|alert|service|'
+                      r'voip|call|sim|nuance|dictat|physical', re.I)
 # the devices of other sources of the car, by their names: never among "the router's other devices" either
-THEIRS = re.compile(r'click|beep|haptic|welcome|asd|ecnr|siri|alexa|carplay|android|aap|a2dp|bluetooth|(?:^|_)bt|usb|tuner|radio|dab|sxm|sdars|'
+THEIRS = re.compile(r'click|beep|haptic|welcome|asd|ecnr|siri|alexa|carplay|carlife|android|aap|a2dp|bluetooth|(?:^|_)bt|usb|tuner|radio|dab|sxm|sdars|'
                     r'(?:^|_)cd(?:_|$)|dvd|aux|optical|ipod|mirror|record|loopback|test|diag', re.I)
 
 
@@ -293,10 +302,167 @@ def options(argv, opt, flags=(), many=()):
     return rest
 
 
+STOCK_PCM = re.compile(r'^(cards|default|sysdefault|front|rear|center_lfe|side|surround\d+|iec958|spdif|hdmi|modem|phoneline|dmix|dsnoop|hw|plughw|plug|shm|tee|file|null|'
+                       r'pulse|dpl|dca|lfloat|oss|jack|usbstream|upmix|vdownmix|speex|speexrate|samplerate|a52|rate|route|multi|asym|softvol|hook|copy|linear|adpcm|alaw|mulaw|meter|ladspa|iec958)$')
+
+
+def read_text(path, limit=1 << 16):
+    try:
+        with open(path, 'rb') as f:
+            return f.read(limit).decode('utf8', 'replace')
+    except OSError:
+        return ''
+
+
+def plumbing(shm, proc, conf, asound):
+    """How the car's programs are wired to its sound, read from /proc and the configuration (nothing is opened):
+    which program has which sound device or buffer, the kernel's sound cards and their streams in use, the devices
+    the ALSA configuration defines, and what the media engine's configuration says of its sound output."""
+    out = {}
+    # the kernel's cards and devices; the streams in use, by whom, in which format
+    out['cards'] = [' '.join(l.split()) for l in read_text(os.path.join(asound, 'cards')).split('\n') if l.strip()][:16]
+    out['pcm'] = [' '.join(l.split()) for l in read_text(os.path.join(asound, 'pcm')).split('\n') if l.strip()][:60]
+    used = []
+    for card in listing(asound):
+        if not re.match(r'^card\d+$', card):
+            continue
+        for pcm in listing(os.path.join(asound, card)):
+            if not re.match(r'^pcm\d+[pc]$', pcm):
+                continue
+            for sub in listing(os.path.join(asound, card, pcm)):
+                if not sub.startswith('sub'):
+                    continue
+                d = os.path.join(asound, card, pcm, sub)
+                st = read_text(os.path.join(d, 'status'), 2000)
+                if not st.strip() or st.strip() == 'closed':
+                    continue
+                state = (re.search(r'state:\s*(\w+)', st) or [None, '?'])[1]
+                owner = re.search(r'owner_pid\s*:\s*(\d+)', st)
+                hw = read_text(os.path.join(d, 'hw_params'), 2000)
+                fmt = ' '.join(x for x in ((re.search(r'rate:\s*(\d+)', hw) or [None, ''])[1] and (re.search(r'rate:\s*(\d+)', hw)[1] + ' Hz'),
+                                           (re.search(r'channels:\s*(\d+)', hw) or [None, ''])[1] and (re.search(r'channels:\s*(\d+)', hw)[1] + ' ch')) if x)
+                if len(used) < 80:
+                    used.append('%s/%s/%s %s%s%s' % (card, pcm, sub, state, ' by ' + who(int(owner.group(1))) if owner else '', ', ' + fmt if fmt else ''))
+    out['used'] = used
+    # which program has which device of the kernel's open and which buffer in shared memory mapped
+    maps, snd = {}, {}
+    for pid in listing(proc):
+        if not pid.isdigit():
+            continue
+        names = set()
+        try:
+            with open(os.path.join(proc, pid, 'maps'), 'rb') as f:
+                for m in re.finditer(rb'/dev/shm/([^\s]+)', f.read(8 << 20)):
+                    names.add(m.group(1).decode('utf8', 'replace'))
+        except OSError:
+            pass
+        devs = set()
+        for fd in listing(os.path.join(proc, pid, 'fd')):
+            try:
+                t = os.readlink(os.path.join(proc, pid, 'fd', fd))
+            except OSError:
+                continue
+            if t.startswith('/dev/snd/') and not t.endswith(('timer', 'seq')):
+                devs.add(t[9:])
+            elif t.startswith('/dev/shm/'):
+                names.add(t[9:])
+        if names or devs:
+            comm = read_text(os.path.join(proc, pid, 'comm'), 64).strip() or '?'
+            if names:
+                maps['%s (%s)' % (comm, pid)] = names
+            if devs:
+                snd['%s (%s)' % (comm, pid)] = sorted(devs)
+    out['snd'] = ['%s: %s' % (k, ', '.join(v[:24])) for k, v in sorted(snd.items())][:30]
+    # (the program with the most buffers is the router itself: only its count; the others' buffers by name)
+    short = lambda n: re.sub(r'_ringbuffer$', '', n)
+    big = max(maps, key=lambda k: len(maps[k])) if maps else None
+    have = []
+    for k in sorted(maps):
+        v = sorted(set(short(n) for n in maps[k]))
+        if k == big and len(v) > 12:
+            have.append('%s: %d buffers (the router)' % (k, len(v)))
+        else:
+            have.append('%s: %s' % (k, ', '.join(v[:30]) + (' +%d more' % (len(v) - 30) if len(v) > 30 else '')))
+    out['maps'] = have[:40]
+    # every buffer there is (smartx_<device>_p: a program plays into the router; _c: it records; avb_: to and from the amplifier)
+    out['shm'] = sorted(set(short(n) for n in listing(shm)))[:260]
+    # the devices the ALSA configuration defines beyond ALSA's own, and the media engine's words about its output
+    pcms, words, files = [], [], []
+    for c in conf:
+        alsa = bool(re.search(r'(asound\.conf|alsa\.conf\.d|alsa/conf\.d)$', c.rstrip('/')))      # ALSA's own files: devices, no players
+        for f in [c] + [os.path.join(c, n) for n in listing(c)]:
+            raw = small(f, 4 << 20)
+            if not raw:
+                continue
+            text = raw.decode('utf8', 'replace')
+            if not alsa:
+                files.append('%s (%d)' % (os.path.basename(f), len(raw)))
+            for m in re.finditer(r'(?m)^\s*pcm\.([A-Za-z0-9_]+)\s*\{', text):
+                name = m.group(1)
+                if STOCK_PCM.match(name) or len(pcms) >= 90:
+                    continue
+                body = text[m.end():m.end() + 500]
+                d = [(re.search(r'\btype\s+"?(\w+)', body) or [None, '?'])[1]]
+                for key in ('card', 'device', 'subdevice', 'pcm', 'name'):
+                    x = re.search(r'\b' + key + r'\s+"?([^\s"{}]+)', body)
+                    if x and not x.group(1).startswith('$'):
+                        d.append(key + ' ' + x.group(1))
+                pcms.append(name + '=' + ' '.join(d[:5]))
+            # a device named the ALSA way, with the names just before it
+            for m in re.finditer(r'["\'>]((?:plug|plughw|hw|smartx|avb|dmix|sysdefault|default|front|surround\d+)(?::[^"\'<\s]{0,80})?)["\'<]', text):
+                before = [w for w in re.findall(r'["\'>]([A-Za-z][A-Za-z0-9_.-]{3,48})["\'<]', text[max(0, m.start() - 400):m.start()])][-3:]
+                w = '%s <- %s' % (m.group(1), ', '.join(before))
+                if w not in words and len(words) < 40:
+                    words.append(w)
+            # what follows the names of our players in it
+            if not alsa:
+                for key in ('OapGenericMedia', 'DynamicMediaPlayerMedia', 'DynamicMedia', 'OnlineEntertainment'):
+                    for m in list(re.finditer(re.escape(key) + r'\b', text))[:2]:
+                        w = '[%s in %s] %s' % (key, os.path.basename(f), ' '.join(text[m.start():m.start() + 420].split()))
+                        if len(words) < 52:
+                            words.append(w)
+                # and its lines about the sound output, whatever they are called
+                for m in re.finditer(r'(?i)[^\n<>]{0,60}(alsa|audio[_-]?(?:sink|device|out)|pcm[_-]?(?:name|device))[^\n<>]{0,140}', text):
+                    w = '[%s] %s' % (os.path.basename(f), ' '.join(m.group(0).split()))
+                    if w not in words and len(words) < 70:
+                        words.append(w)
+    out['pcms'] = pcms
+    out['words'] = words
+    out['files'] = files[:40]
+    # the sound programs' libraries: what the media engine plays with
+    libs = []
+    for pid in listing(proc):
+        if not pid.isdigit():
+            continue
+        comm = read_text(os.path.join(proc, pid, 'comm'), 64).strip()
+        if not re.search(r'mediaengine|mediaapp|waveplayer|AudioManager|AlsaRouting|avb|smartx', comm, re.I):
+            continue
+        cmd = read_text(os.path.join(proc, pid, 'cmdline'), 600).replace('\x00', ' ').strip()
+        found = set()
+        try:
+            with open(os.path.join(proc, pid, 'maps'), 'rb') as f:
+                for m in re.finditer(rb'/([^/\s]+\.so[.\d]*)', f.read(8 << 20)):
+                    n = m.group(1).decode('ascii', 'replace')
+                    if re.search(r'asound|smartx|avb|ias|audio|pulse|cinemo|nme|gst|pcm|snd|sink', n, re.I):
+                        found.add(re.sub(r'\.so[.\d]*$', '', n))
+        except OSError:
+            pass
+        if len(libs) < 14:
+            libs.append('%s (%s) [%s]: %s' % (comm, pid, cmd[:200], ', '.join(sorted(found)[:40])))
+    out['libs'] = libs
+    return out
+
+
 def probe(argv):
-    opt = {'--shm': '/dev/shm', '--run': '/run/smartx', '--am': '/usr/share/audiomanager', '--alsa-lib': None}
+    opt = {'--shm': '/dev/shm', '--run': '/run/smartx', '--am': '/usr/share/audiomanager', '--alsa-lib': None, '--proc': '/proc', '--asound': '/proc/asound'}
     options(argv, opt, many=('--conf',))
-    conf = opt.get('--conf') or ['/etc/asound.conf', '/usr/share/alsa/alsa.conf.d', '/etc/alsa/conf.d', '/etc/mediaconfig', '/etc/audiomanager']
+    conf = opt.get('--conf') or ['/etc/asound.conf', '/usr/share/alsa/alsa.conf.d', '/etc/alsa/conf.d', '/etc/mediaconfig', '/etc/audiomanager', '/etc/mediaapp', '/etc/smartx']
+    # (and the configuration files the media programs were started with)
+    for pid in listing(opt['--proc']):
+        if pid.isdigit() and re.search(r'mediaengine|mediaapp', read_text(os.path.join(opt['--proc'], pid, 'comm'), 64)):
+            for a in read_text(os.path.join(opt['--proc'], pid, 'cmdline'), 2000).split('\x00'):
+                if re.search(r'^/[\w./-]+\.(xml|json|conf|cfg|ini)$', a) and a not in conf and not any(a.startswith(c.rstrip('/') + '/') for c in conf):
+                    conf.append(a)
     res = {'devices': [], 'others': [], 'shm': [], 'run': [], 'conf': [], 'map': [], 'notes': []}
     names = {}       # a device's name -> how sure it exists: 2 the router has its buffer, 1 a configuration names it, 0 a name of the audio manager's
     held = {}
@@ -336,17 +502,13 @@ def probe(argv):
                 for w in words[-5:]:
                     if w not in got and w != dev and not re.match(r'^(plug|smartx|true|false|alsa|default)$', w, re.I) and len(got) < 8:
                         got.append(w)
-    for n in listing(opt['--am']):
-        for m in re.finditer(rb'[A-Za-z][A-Za-z0-9_]{2,48}', small(os.path.join(opt['--am'], n), 6 << 20)):
-            w = m.group(0).decode('ascii')
-            if OURS.search(w) and not NOT_OURS.search(w) and len(names) < 400:
-                add(w, 0)
+    # (the audio manager's names are not devices: on the car none of them opened)
     res['conf'] = sorted(names, key=lambda n: (-names[n], n))[:160]
     res['map'] = ['%s: %s' % (n, ', '.join(near[n])) for n in sorted(near) if near[n]][:60]
 
     def ours(n):
         # (a device whose name says nothing but which the configuration gives to a player of ours counts too)
-        return (OURS.search(n) or any(re.search(r'oap|dynamic|online', w, re.I) for w in near.get(n, []))) and not NOT_OURS.search(n)
+        return (OURS.search(n) or any(re.search(r'oap|dynamic|online', w, re.I) for w in near.get(n, []))) and not NOT_OURS.search(n) and not THEIRS.search(n)
 
     def rank(n):
         return score(n) + (30 if any(re.search(r'oap.?generic|dynamic', w, re.I) for w in near.get(n, [])) else 0)
@@ -363,6 +525,10 @@ def probe(argv):
         res['notes'].append('no device of the router is named like ours (oap, generic, dynamic, online, media)')
     if not res['shm']:
         res['notes'].append('no buffer of the router in ' + opt['--shm'])
+    try:
+        res['plumbing'] = plumbing(opt['--shm'], opt['--proc'], conf, opt['--asound'])
+    except Exception as e:            # (never the probe's end)
+        res['notes'].append('the plumbing could not be read: %r' % (e,))
     sys.stdout.write(json.dumps(res))
     return 0
 

@@ -114,8 +114,29 @@ async function read(o) {
     Object.keys(res).forEach((k) => { if (k !== 'file') out[k] = res[k]; });
     // not understood: at least the text around what matters, as written (nothing is run for this)
     if (!res.ok && !(res.near && res.near.length)) out.near = textNear(found.text);
+    // how the focus is asked for, wherever in the bundle that is written (the app's own part too): as text, nothing run
+    out.near = textFocus(found.text).concat(out.near || []);
     out.ok = !!res.ok && !res.error;
     if (!out.ok && !out.error) out.error = (res.notes && res.notes[0]) || 'the SDK\'s player was not understood';
+    return out;
+}
+
+/* The stretches of a bundle's text about the audio focus: the call with its three arguments as written, and what an
+ * app does before it reports that registering the focus failed. [{ what, text }]. */
+function textFocus(text) {
+    const out = [], seen = [];
+    [['AudioFocus call (clientName:)', /clientName\s*:/g, 320, 260], ['AudioFocus call (timeOutHeartBeatTimer:)', /timeOutHeartBeatTimer\s*:/g, 380, 160],
+        ['AudioFocus registration (the app)', /Register audio [Ff]ocus failed/g, 800, 120], ['AudioFocus (clientId =)', /\bclientId\s*=[^=]/g, 160, 260]].forEach((k) => {
+        k[1].lastIndex = 0;
+        let x, n = 0;
+        while ((x = k[1].exec(text)) && out.length < 7 && n < 2) {
+            const at = x.index;
+            if (seen.some((p) => Math.abs(p - at) < 500)) continue;       // (not the same stretch twice)
+            seen.push(at);
+            n++;
+            out.push({ what: k[0], text: text.slice(Math.max(0, at - k[2]), at + k[3]).replace(/\s+/g, ' ') });
+        }
+    });
     return out;
 }
 
@@ -492,4 +513,5 @@ function worker() {
 
 if (require.main === module && process.argv[2] === 'worker') worker();
 
-module.exports = { read: read, findBundle: findBundle, textNear: textNear, decode: decode, hasStub: hasStub, show: show, preludeEnd: preludeEnd, SAMPLE: SAMPLE, DMP_METHODS: DMP_METHODS, DMP_FIELDS: DMP_FIELDS };
+module.exports = {
+    textFocus: textFocus, read: read, findBundle: findBundle, textNear: textNear, decode: decode, hasStub: hasStub, show: show, preludeEnd: preludeEnd, SAMPLE: SAMPLE, DMP_METHODS: DMP_METHODS, DMP_FIELDS: DMP_FIELDS };

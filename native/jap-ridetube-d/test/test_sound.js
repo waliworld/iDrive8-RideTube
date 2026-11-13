@@ -181,7 +181,8 @@ async function main() {
     await t('the heartbeat timer in seconds with a limit, a client id the player does not know: the next values are taken', async () => {
         const u = await unit({ hbOk: (hb) => hb <= 60, clientOk: (id) => id === 'RideTube' }, { sdk: false });
         await u.a.play(u.file);
-        assert.deepStrictEqual(u.car.dyn('getAudioFocus').map((c) => c.a.clientId + ' ' + c.a.timeOutHeartBeatTimer), ['jap_ridetube8 10000', 'RideTube 10000', 'RideTube 5000', 'RideTube 30']);
+        assert.deepStrictEqual(u.car.dyn('getAudioFocus').map((c) => c.a.clientId + ' ' + c.a.timeOutHeartBeatTimer), ['jap_ridetube8 10000', 'RideTube 10000', 'RideTube 5000', 'RideTube 3000', 'RideTube 2000', 'RideTube 1000', 'RideTube 500', 'RideTube 30']);
+        assert.ok(/getAudioFocus\(RideTube, RideTube, 30\) -> .*OK.* \| refused before: GENERAL_ERROR x1, BAD_ARGUMENT x6/.test(u.story()), u.story());
         assert.deepStrictEqual([u.kept().clientId, u.kept().hb], ['RideTube', 30]);
         await u.a.release();
         // a player that knows only the names the app manager has for the apps: our home's, its number, and last the
@@ -192,6 +193,26 @@ async function main() {
         assert.deepStrictEqual(v.car.dyn('getAudioFocus').map((c) => c.a.clientId), ['jap_ridetube8', 'RideTube', 'oap_12300', '12300', 'bmw_videoapp']);
         assert.strictEqual(v.kept().clientId, 'bmw_videoapp');
         await v.a.release();
+    });
+
+    await t('a player that refuses every way it is asked (the car, 0.5.0): asked in many more ways - no timer, the name shown the same as the name - and the story has one line of it, not one a try', async () => {
+        // (it wants the name shown to be the name itself, and no timer)
+        const u = await unit({ hbOk: (hb) => hb === 0, nameOk: (name, id) => name === id && id !== 'RideTube' }, { sdk: false });
+        await u.a.play(u.file);
+        assert.deepStrictEqual([u.kept().clientId, u.kept().clientName, u.kept().hb], ['jap_ridetube8', 'jap_ridetube8', 0], u.story());
+        assert.strictEqual(u.story().split('\n').filter((l) => /getAudioFocus/.test(l)).length, 1, u.story());
+        await u.a.release();
+        // the next play asks that way at once
+        u.car.calls.length = 0;
+        await u.a.play(u.file);
+        assert.deepStrictEqual(u.car.dyn('getAudioFocus').map((c) => c.a), [{ clientId: 'jap_ridetube8', clientName: 'jap_ridetube8', timeOutHeartBeatTimer: 0 }]);
+        await u.a.release();
+        // one that takes nothing at all: one line an instance, with what was asked
+        const v = await unit({ hbOk: () => false }, { sdk: false });
+        await assert.rejects(v.a.play(v.file), /no way to play sound/);
+        const fl = v.story().split('\n').filter((l) => /getAudioFocus/.test(l));
+        assert.strictEqual(fl.length, 3, v.story());
+        assert.ok(/getAudioFocus refused all \d+ ways it was asked: BAD_ARGUMENT x\d+ \| names jap_ridetube8, RideTube, oap_12300, 12300 \| shown as RideTube, the name itself, nothing \| timers 10000, 5000, 3000, 2000, 1000, 500, 30, 10, 5, 3, 2, 1, 0, 60, 15000, 30000, 60000/.test(fl[0]), fl[0]);
     });
 
     await t('an instance that does not answer or gives no focus: the next one (TempMedia)', async () => {
@@ -478,6 +499,23 @@ async function main() {
         assert.ok(/^BMW's own player code: read from .*oap_12209\/source\/javascript\/app\.js \(class MediaPlayerImpl, module 3 of 7\)\nThe item as it writes it: \[\{pos: 1, id: <Buffer 0000000\d>, metadata: \[\{key: "FILE_NAME", value: \{stringValue: "\/rt-sample\/audio-RTSAMPLE\.m4a"\}\}/.test(code), code);
         assert.ok(/Its calls of the player: .*\[connect\(\)\] getAudioFocus\(\{clientId: <this\.app\.getAppId\(\)>, clientName: <this\.app\.name>, timeOutHeartBeatTimer: 5\}\)/.test(code), code);
         assert.ok(/Its timers: .*interval 2000 ms/.test(code) && /\[playlistConverter\] playlistConverter\(list, start\)/.test(code) && /Its states against a simulated car: constructed = Disconnected/.test(code), code);
+        // the top of the page: how BMW's code asks for the focus - its call as recorded, the methods that make it, the
+        // bundle's own words wherever they are, and how the two apps name themselves
+        fs.writeFileSync(path.join(u.oap, 'oap_12209', 'source', 'package.json'), JSON.stringify({ name: 'bmw_videoapp', version: '1.2.3', oap: { appId: 'video.app' }, scripts: { a: 'b' } }));
+        const fl = s.focusLines(), focus = fl.join('\n');
+        assert.ok(/^BMW's own player code: read from .*oap_12209\/source\/javascript\/app\.js \(class MediaPlayerImpl\)$/.test(fl[0]), fl[0]);
+        assert.ok(/^It asks: getAudioFocus\(\{clientId: <this\.app\.getAppId\(\)>, clientName: <this\.app\.name>, timeOutHeartBeatTimer: 5\}\) \[in connect\(\)\]/.test(fl[1]), fl[1]);
+        assert.ok(/^Its heartbeat: interval 2000 ms/.test(fl[2]), fl[2]);
+        assert.ok(/\n\[connect\] connect\(\)[^\n]*getAudioFocus\(\{ clientId: this\.app\.getAppId\(\)/.test(focus) && focus.split('[near AudioFocus').length === 2, focus);
+        assert.ok(/\n\[near AudioFocus call \(clientName:\)\] [^\n]*clientId: this\.app\.getAppId\(\), clientName: this\.app\.name, timeOutHeartBeatTimer: HEARTBEAT_TIMEOUT/.test(focus), focus);
+        assert.ok(/\nThat app's package: oap_12209 \{"name":"bmw_videoapp","version":"1\.2\.3","oap":"\{\\"appId\\":\\"video\.app\\"\}"\}/.test(focus), focus);
+        // ... and none of that twice further down
+        assert.ok(!/\n\[connect\] /.test('\n' + s.codeLines().join('\n')) && /\[playlistConverter\]/.test(s.codeLines().join('\n')));
+        // the car's sound wiring as the probe read it
+        s.probe = { plumbing: { snd: ['mediaengine (4103): pcmC0D3p'], maps: ['mediaengine (4103): smartx_Entertainment_p'], used: ['card0/pcm3p/sub0 RUNNING by mediaengine (4103), 48000 Hz 2 ch'], words: ['hw:0,3 <- OapGenericMedia'],
+            pcms: ['entertainment_main=hw card aplmgu device 3'], cards: ['0 [aplmgu]'], pcm: ['00-03: Media'], libs: [], shm: ['avb_Amp_p', 'smartx_X_p'], files: ['a.xml (10)'] } };
+        assert.deepStrictEqual(s.plumbingLines().slice(0, 4), ['Programs and the sound devices they have open (/dev/snd): mediaengine (4103): pcmC0D3p', 'Programs and the router\'s buffers they have (/dev/shm): mediaengine (4103): smartx_Entertainment_p',
+            'The kernel\'s sound streams in use: card0/pcm3p/sub0 RUNNING by mediaengine (4103), 48000 Hz 2 ch', 'The media engine\'s configuration about its sound output: hw:0,3 <- OapGenericMedia']);
         await u.a.release();
     });
 

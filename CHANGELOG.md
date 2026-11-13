@@ -1,5 +1,26 @@
 # Changelog
 
+## Service 0.5.1: iDrive 8, what the first car answered to 0.5.0
+
+A G8x on iDrive 8 answered 0.5.0 (three photographed pages). None of it played; this is what it said and what
+follows from it. Still not confirmed on a car.
+
+- **The dynamic player refused the audio focus**: `BAD_ARGUMENT` to every name we gave with every timer, on all
+  three instances - so no playlist was ever asked. `getAudioFocus` is now asked in many more ways (the names BMW's
+  own code passes where they are plain words; timers from none to a minute; shown under our title, under the name
+  itself and under nothing), and the story has one line of it instead of one a try (they filled two pages).
+- **How BMW's own code asks for the focus is now at the top of the Diagnostics page**: its call as the reading
+  recorded it, the text of the methods that make it, the bundle's own words around `clientName:` and around the
+  app's "Register audio focus failed", and how that app and ours name themselves in their packages.
+- **The router has no device for our source on this car.** Its only free devices were CarLife's and Android Auto's
+  (they take no samples with our source connected); the audio manager's names (`OAPMedia`, `DynamicMedia`, ...) are
+  not devices. So the probe now reads how the car's programs are wired to its sound, without opening anything:
+  which program has which kernel sound device open and which buffer mapped, the kernel's streams in use, the
+  devices the ALSA configuration defines, and what the media engine's configuration says of its output.
+- The probe no longer lists the audio manager's names, nor other sources' media devices; the telephone's and the
+  speech devices (`Voip`, `eSimCall`, `Nuance`), which 0.5.0 opened for a moment as "other" devices, are never
+  touched. Where setting a device up fails, libasound's own word of the step that failed is kept.
+
 ## Service 0.5.0, app 0.4.6: iDrive 8, a play works through every way to sound until one plays
 
 Nobody has heard RideTube on an iDrive 8 yet, and every single guess cost its driver a trip to the car. So a play

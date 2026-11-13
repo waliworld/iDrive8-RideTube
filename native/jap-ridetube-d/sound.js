@@ -367,39 +367,57 @@ DynRoute.prototype.button = async function (b) {
     await one('RELEASE');
     return r;
 };
-/* The focus: a token, kept alive by our beat. Its timer's unit is not known: BMW's own value first (sdkread), then
- * values that are right as milliseconds, then as seconds - a BAD_ARGUMENT takes the next. */
+/* The focus: a token, kept alive by our beat. What the player wants to be asked with is not known (on the car it
+ * answered BAD_ARGUMENT to every name with five timers), so: what BMW's own code passes where that could be read
+ * (sdkread), then every name of ours with a wide row of timers (right as milliseconds, as seconds, none), shown under
+ * our title, under the name itself and under nothing. Each answer takes milliseconds. The story gets one line. */
 DynRoute.prototype.getFocus = async function (hint) {
     const sdk = this.s.sdkFacts();
-    const ids = uniq([hint && hint.clientId].concat(this.s.clientIds()));
-    const hbs = uniq([hint && hint.hb, sdk.hb, this.o.dynHeartbeatTimer || 10000, 5000, 30, 10, 5]);
-    let last = null;
-    for (const clientId of ids) {
-        for (const hb of hbs) {
-            let r;
-            try { r = await this.call('getAudioFocus', { clientId: clientId, clientName: 'RideTube', timeOutHeartBeatTimer: hb }); } catch (e) {
-                last = errText(e);
-                this.say('getAudioFocus(' + clientId + ', RideTube, ' + hb + ') failed: ' + last);
-                // (no answer at all is not about the name asked under: this instance is left)
-                if (/timed out|timeout|unavailable/i.test(last)) throw this.fail('does not answer getAudioFocus (' + last.slice(0, 80) + ')');
-                break;
+    const ids = uniq([hint && hint.clientId].concat(sdk.clientIds || [], this.s.clientIds()));
+    const hbs = uniq([hint && hint.hb, sdk.hb, this.o.dynHeartbeatTimer || 10000, 5000, 3000, 2000, 1000, 500, 30, 10, 5, 3, 2, 1, 0, 60, 15000, 30000, 60000]);
+    const titles = uniq([hint && hint.clientName, sdk.clientName, 'RideTube']);
+    const combos = [];
+    ids.forEach((id) => titles.forEach((t) => hbs.forEach((hb) => combos.push([id, t, hb]))));
+    ids.forEach((id) => [id, ''].forEach((t) => hbs.forEach((hb) => { if (titles.indexOf(t) < 0) combos.push([id, t, hb]); })));
+    const said = {}, skip = {};
+    const sum = () => Object.keys(said).map((k) => k + ' x' + said[k]).join(', ') || 'nothing asked';
+    const what = () => 'names ' + ids.join(', ') + ' | shown as ' + titles.concat(['the name itself', 'nothing']).join(', ') + ' | timers ' + hbs.join(', ');
+    const end = Date.now() + (this.o.dynFocusMs || 25000);
+    let last = null, n = 0;
+    for (const c of combos) {
+        if (skip[c[0] + '|' + c[1]] || this.s.cancelled || Date.now() > end || n >= 400) continue;
+        let r;
+        n++;
+        try { r = await this.call('getAudioFocus', { clientId: c[0], clientName: c[1], timeOutHeartBeatTimer: c[2] }); } catch (e) {
+            last = errText(e);
+            // (no answer at all is not about what was asked: this instance is left)
+            if (/timed out|timeout|unavailable/i.test(last)) {
+                this.say('getAudioFocus(' + c.join(', ') + ') failed: ' + last + (n > 1 ? ' | before: ' + sum() : ''));
+                throw this.fail('does not answer getAudioFocus (' + last.slice(0, 80) + ')');
             }
-            this.say('getAudioFocus(' + clientId + ', RideTube, ' + hb + ') -> ' + show(r));
-            last = r && r.dynMediaPlayerError;
-            if (r && r.dynMediaPlayerError === 'OK' && r.token) {
-                this.token = r.token;
-                this.focus = { clientId: clientId, hb: hb };
-                const every = Math.max(300, Math.min(this.o.dynHeartbeatMs || 1500, sdk.beatMs || 1e9, hb >= 900 && hb < 1e9 ? Math.floor(hb / 3) : 1e9));
-                this.beat = setInterval(() => {
-                    this.call('heartBeat', { token: this.token }, 2000).catch((e) => { if (!this.beatSaid) this.say('heartBeat failed: ' + errText(e)); this.beatSaid = true; });
-                }, every);
-                if (this.beat.unref) this.beat.unref();
-                return;
-            }
-            if (last !== 'BAD_ARGUMENT') break;
+            said['failed: ' + last.slice(0, 60)] = (said['failed: ' + last.slice(0, 60)] || 0) + 1;
+            skip[c[0] + '|' + c[1]] = true;
+            continue;
         }
+        last = r && r.dynMediaPlayerError;
+        if (r && r.dynMediaPlayerError === 'OK' && r.token) {
+            this.say('getAudioFocus(' + c.join(', ') + ') -> ' + show(r) + (n > 1 ? ' | refused before: ' + sum() : ''));
+            this.token = r.token;
+            this.focus = { clientId: c[0], clientName: c[1], hb: c[2] };
+            const every = Math.max(300, Math.min(this.o.dynHeartbeatMs || 1500, sdk.beatMs || 1e9, c[2] >= 900 && c[2] < 1e9 ? Math.floor(c[2] / 3) : 1e9));
+            this.beat = setInterval(() => {
+                this.call('heartBeat', { token: this.token }, 2000).catch((e) => { if (!this.beatSaid) this.say('heartBeat failed: ' + errText(e)); this.beatSaid = true; });
+            }, every);
+            if (this.beat.unref) this.beat.unref();
+            return;
+        }
+        const k = String(last === undefined ? show(r) : last).slice(0, 60);
+        said[k] = (said[k] || 0) + 1;
+        // (an answer other than "bad argument" is not about the timer: the next name)
+        if (last !== 'BAD_ARGUMENT') skip[c[0] + '|' + c[1]] = true;
     }
-    throw this.fail('gave no audio focus (' + String(last).slice(0, 80) + ')');
+    this.say('getAudioFocus refused all ' + n + ' ways it was asked: ' + sum() + ' | ' + what());
+    throw this.fail('gave no audio focus (' + sum().slice(0, 80) + ')');
 };
 /* Connected to the car's audio, as BMW's SDK waits for it before it plays: ms at most, what it said either way. */
 DynRoute.prototype.waitConnected = async function (ms) {
@@ -888,8 +906,13 @@ Sound.prototype.sdkFacts = function () {
         const call = (r.calls || []).filter((c) => c.method === 'createPlaylist' && c.args && Array.isArray(c.args.newPlaylist) && c.args.newPlaylist.length === 1 && !sdkread.hasStub(c.args.newPlaylist))[0];
         const enc = list || (call && call.args.newPlaylist);
         if (enc && JSON.stringify(enc).indexOf(sdkread.SAMPLE.file) >= 0) f.item = sdkread.decode(enc);
-        const focus = (r.calls || []).filter((c) => c.method === 'getAudioFocus' && c.args && typeof c.args.timeOutHeartBeatTimer === 'number')[0];
+        const asks = (r.calls || []).filter((c) => c.method === 'getAudioFocus' && c.args && typeof c.args === 'object');
+        const focus = asks.filter((c) => typeof c.args.timeOutHeartBeatTimer === 'number')[0];
         if (focus) f.hb = focus.args.timeOutHeartBeatTimer;
+        // (a name it passes as a plain word is tried as it is; one it takes from the app is seen on the page)
+        const plain = (v) => typeof v === 'string' && /^[\w.@\/ -]{1,80}$/.test(v) && !/^RT/.test(v);
+        f.clientIds = uniq(asks.map((c) => c.args.clientId).filter(plain));
+        f.clientName = asks.map((c) => c.args.clientName).filter(plain)[0];
         const iv = (r.timers || []).filter((t) => t.kind === 'interval' && /heartBeat/i.test(String(t.fn)) && t.ms >= 100)[0];
         if (iv) f.beatMs = iv.ms;
         const pf = (r.calls || []).filter((c) => /playFile\(/.test(String(c.in)));
@@ -1274,6 +1297,56 @@ Sound.prototype.lines = function () {
     return out;
 };
 /* BMW's own player code as read on this car: the item as it writes it, its calls, its timers, its methods' text. */
+/* How BMW's own code asks the player for the audio focus, for the top of the page: the player answers BAD_ARGUMENT to
+ * our asking, and this is where the right one is to be seen - its call as the reading recorded it (what it takes
+ * from the app shows as <...>), the text of the methods that make it, and how the two apps name themselves. */
+Sound.prototype.focusLines = function () {
+    const out = [], r = this.sdk;
+    if (!r) return ['BMW\'s own player code has not been looked for yet (a play does that).'];
+    out.push('BMW\'s own player code: ' + (r.ok ? 'read from ' + r.file + ' (class ' + r.cls + ')' : 'NOT read: ' + r.error + (r.file ? ' (' + r.file + ')' : '')));
+    const asks = (r.calls || []).filter((c) => /AudioFocus|heartBeat/.test(c.method));
+    if (asks.length) out.push('It asks: ' + uniq(asks.map((c) => c.method + '(' + sdkread.show(c.args).slice(0, 320) + ') [in ' + c.in + ']')).slice(0, 5).join(' || '));
+    const beats = (r.timers || []).filter((t) => /heart/i.test(String(t.fn) + t.in));
+    if (beats.length) out.push('Its heartbeat: ' + uniq(beats.map((t) => t.kind + ' ' + t.ms + ' ms [' + t.in + ']')).slice(0, 4).join(' || '));
+    Object.keys(r.methods || {}).filter((n) => this.focusText(n)).forEach((n) => out.push('[' + n + '] ' + String(r.methods[n]).slice(0, n === 'constructor' ? 1300 : 1700)));
+    (r.near || []).filter((x) => /AudioFocus|HeartBeat/i.test(x.what)).slice(0, 7).forEach((x) => out.push('[near ' + x.what + '] ' + String(x.text).slice(0, 950)));
+    // how the app whose code this is names itself, and how ours does: a name the player knows may be one of these
+    const pkg = (home) => {
+        const j = home ? readJson(path.join(home, 'source', 'package.json')) : null;
+        if (!j || typeof j !== 'object') return null;
+        const o = {};
+        Object.keys(j).slice(0, 40).forEach((k) => { const v = j[k]; if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') o[k] = typeof v === 'string' ? v.slice(0, 60) : v; else if (v && typeof v === 'object' && /oap|app|bmw|config|audio|media/i.test(k)) o[k] = JSON.stringify(v).slice(0, 260); });
+        return path.basename(home) + ' ' + JSON.stringify(o).slice(0, 700);
+    };
+    try {
+        const m = r.file ? /^(.*\/oap_\d+)\//.exec(r.file) : null;
+        const theirs = pkg(m && m[1]), ours = pkg(this.expose.appHome());
+        if (theirs) out.push('That app\'s package: ' + theirs);
+        if (ours) out.push('Our app\'s package: ' + ours);
+    } catch (e) { /* not this time */ }
+    return out;
+};
+/* Whether a method of BMW's class is about the focus (its text goes to the top of the page, not further down). */
+Sound.prototype.focusText = function (n) {
+    const t = String((this.sdk && this.sdk.methods && this.sdk.methods[n]) || '');
+    return /getAudioFocus\s*\(|\.heartBeat\s*\(/.test(t) || (n === 'constructor' && t.length > 0);
+};
+/* How the car's programs are wired to its sound (ytalsa.py probe's "plumbing"), the telling parts first. */
+Sound.prototype.plumbingLines = function () {
+    const p = this.probe && this.probe.plumbing, out = [];
+    if (!p) return out;
+    const put = (title, list, max) => { if (list && list.length) out.push(title + ': ' + list.join(' | ').slice(0, max)); };
+    put('Programs and the sound devices they have open (/dev/snd)', p.snd, 900);
+    put('Programs and the router\'s buffers they have (/dev/shm)', p.maps, 1300);
+    put('The kernel\'s sound streams in use', p.used, 900);
+    put('The media engine\'s configuration about its sound output', p.words, 2600);
+    put('Sound devices the ALSA configuration defines', p.pcms, 1100);
+    put('Sound cards', (p.cards || []).concat(p.pcm || []), 900);
+    put('The sound programs and their libraries', p.libs, 1300);
+    put('Every buffer in /dev/shm', p.shm, 1500);
+    put('Configuration files', p.files, 500);
+    return out;
+};
 Sound.prototype.codeLines = function () {
     const out = [], r = this.sdk;
     if (r) {
@@ -1289,8 +1362,9 @@ Sound.prototype.codeLines = function () {
         const notes = (r.notes || []).concat(Object.keys(r.failed || {}).slice(0, 6).map((id) => 'module ' + id + ' did not load: ' + r.failed[id]));
         if (notes.length) out.push('Notes of the reading: ' + notes.join(' || '));
         if (r.methodNames) out.push('Its methods: ' + r.methodNames.join(', '));
-        Object.keys(r.methods || {}).forEach((n) => out.push('[' + n + '] ' + r.methods[n]));
-        (r.near || []).forEach((x) => out.push('[near ' + x.what + '] ' + x.text));
+        // (the methods about the focus are at the top of the page: focusLines)
+        Object.keys(r.methods || {}).filter((n) => !this.focusText(n)).forEach((n) => out.push('[' + n + '] ' + r.methods[n]));
+        (r.near || []).filter((x) => !/AudioFocus|HeartBeat/i.test(x.what)).forEach((x) => out.push('[near ' + x.what + '] ' + x.text));
     }
     return out;
 };
@@ -1305,7 +1379,7 @@ Sound.prototype.deviceLines = function () {
         out.push('The audio router\'s devices named like ours: ' + (p.error ? 'not read: ' + p.error : (p.devices || []).map((d) => short(d.name) + (d.sure === 2 ? '' : d.sure === 1 ? ' (named in a configuration)' : ' (a name of the audio manager\'s)') +
             (d.held ? ' [open in ' + d.held + ']' : '')).join(' | ') || 'none found'));
         if (p.run && p.run.some((x) => x.indexOf(': ') > 0)) out.push('Devices a program has open now (/run/smartx): ' + p.run.filter((x) => x.indexOf(': ') > 0).slice(0, 60).join(' | '));
-        if (p.shm && p.shm.length) out.push('All of the router\'s buffers (/dev/shm; _p plays, _c records): ' + uniq(p.shm.map((n) => String(n).replace(/^smartx_/, '').replace(/_ringbuffer$/, ''))).slice(0, 160).join(', '));
+        if (p.shm && p.shm.length && !p.plumbing) out.push('All of the router\'s buffers (/dev/shm; _p plays, _c records): ' + uniq(p.shm.map((n) => String(n).replace(/^smartx_/, '').replace(/_ringbuffer$/, ''))).slice(0, 160).join(', '));
         if (p.map && p.map.length) out.push('Which player the car\'s configuration gives a device to (the names just before it): ' + p.map.slice(0, 40).join(' | '));
         if (p.conf && p.conf.length) out.push('Device names in the car\'s configuration: ' + p.conf.slice(0, 90).join(', '));
         if (p.notes && p.notes.length) out.push('Notes of the probe: ' + p.notes.slice(0, 8).join(' || '));

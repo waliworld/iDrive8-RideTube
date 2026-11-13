@@ -104,6 +104,7 @@ function fakeCar(ways) {
                 if (m === 'getAudioFocus') {
                     if (!car.clientOk(a.clientId)) return { dynMediaPlayerError: 'GENERAL_ERROR', token: '' };
                     if (!car.hbOk(a.timeOutHeartBeatTimer)) return { dynMediaPlayerError: 'BAD_ARGUMENT', token: '' };
+                    if (car.nameOk && !car.nameOk(a.clientName, a.clientId)) return { dynMediaPlayerError: 'BAD_ARGUMENT', token: '' };
                     s.token = 'TOK' + (++tokens); s.clientId = a.clientId; s.lists = 0;
                     tell();
                     if (car.connectMs >= 0) setTimeout(() => { if (s.token) { s.conn = 'CS_CONNECTED'; emit(inst, 'connectionState', 'CS_CONNECTED'); } }, car.connectMs);

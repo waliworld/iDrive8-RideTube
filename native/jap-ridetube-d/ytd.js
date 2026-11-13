@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.5.0';
+const VERSION = '0.5.1';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -2162,8 +2162,11 @@ Daemon.prototype.diagLines = async function () {
         let sl = [];
         try { sl = snd.lines(); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
         sl.forEach((l) => out.push(l));
-        // the car's sound devices right after: what the quick ways rest on
-        try { sl = snd.deviceLines(); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
+        // how BMW's own code asks for the audio focus: what our asking has to become
+        try { sl = snd.focusLines(); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
+        if (sl.length) { out.push('# How BMW\'s own code asks for the sound'); sl.forEach((l) => out.push(l)); }
+        // how the car's programs are wired to its sound, and its sound devices: what the service's own player rests on
+        try { sl = snd.plumbingLines().concat(snd.deviceLines()); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
         if (sl.length) { out.push('# The car\'s sound devices'); sl.forEach((l) => out.push(l)); }
         // a way that took samples and was not heard: how a player tells the audio manager that its source plays
         if (Object.keys((snd.state && snd.state.silent) || {}).some((k) => /^(direct|focus):/.test(k))) {
