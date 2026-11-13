@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.4.8';
+const VERSION = '0.4.9';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -1145,7 +1145,8 @@ Audio.prototype.settlePlayer = async function () {
         while (!up && Date.now() < end) { await sleep(200); up = await this.answers(this.mp); }
         this.diag.mp.available = up;
         if (!up && this.opts.probe) this.diag.mp.available = await this.findPlayer(ms(this.opts.probeMs, 3000));
-        if (!this.diag.mp.available) await this.dynamic();
+        // (the dynamic player's proxy is made now: a proxy answers only a moment after it is made)
+        if (!this.diag.mp.available) await this.dynamic(this.opts.dynamic !== false);
     } catch (e) { this.note('looking for the media player failed: ' + errText(e)); }
 };
 /* The whole start, which the daemon repeats until it succeeds (Daemon.start): the proxies, the audio manager
@@ -1372,7 +1373,12 @@ Audio.prototype.dynReady = async function () {
         const inst = this.dynInst();
         if (!inst) return null;
         const px = await this.proxy('DynamicMediaPlayer', this.dyn.cfg, inst, this.dyn.file, 4000);
-        return (await this.answers(px)) ? px : null;
+        // a proxy just made says "not available" for a moment (seen on a car): it is given dynWaitMs
+        const end = Date.now() + (this.opts.dynWaitMs === undefined ? 5000 : this.opts.dynWaitMs);
+        let up = await this.answers(px);
+        while (!up && Date.now() < end) { await sleep(250); up = await this.answers(px); }
+        if (!up) this.note('the dynamic media player does not answer');
+        return up ? px : null;
     } catch (e) { this.note('the dynamic media player could not be reached: ' + errText(e)); return null; }
 };
 /* Its fields and events, heard once per proxy: the last of each kept for the page; while a play goes through it,
@@ -1852,6 +1858,14 @@ Daemon.prototype.waitForBoot = async function () {
 // player. A start that is waiting for its next try makes it now.
 Daemon.prototype.audioReady = function (ms) {
     if (this.audioKick) this.audioKick();
+    // a play while the head unit is still starting (iDrive 8: the service keeps away for settleS) waits for the start
+    // to be over, not 10 s: the driver sees the player loading, not an error to press again
+    if (!this.audio.diag.ready) {
+        let up = Infinity;
+        try { up = parseFloat(fs.readFileSync(this.opts.uptimeFile, 'utf8')); } catch (e) { /* unknown: no wait to add */ }
+        const left = (this.opts.settleS || 0) - up;
+        if (left > 0) ms += left * 1000 + (this.opts.audioStartMs === undefined ? 15000 : this.opts.audioStartMs);
+    }
     return withTimeout(this.ready, ms, 'audio service').catch(() => { throw new Error(this.audio.why()); });
 };
 // ---- diagnostics: the app's Settings > Diagnostics page (nobody reads a journal in a car; a photo of the page tells

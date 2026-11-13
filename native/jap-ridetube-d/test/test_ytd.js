@@ -1827,13 +1827,13 @@ async function main() {
         const dq = new Daemon({ someip: sip, srcGen: root, oapRoot: path.join(root, 'oap'), catalogs: [path.join(root, 'cat.json')], generators: [gen], mainapps: [], policyDirs: [], searchRoots: [],
             procRoot: path.join(root, 'proc'), unitDirs: [], asound: path.join(root, 'asound'), ytdec: fakeYtdec, cacheDir: path.join(root, 'cache'), logDir: tmp, sock: path.join(tmp, 'ctlq.sock'), stateDir: path.join(tmp, 'stq'),
             noSetuid: true, spare: false, resume: false, fetchRetryMs: [], noHwCheck: true, accountFile: path.join(tmp, 'acctq.json'), ytRequest: fakeYt, audioConf: path.join(root, 'audio.json'),
-            playerWaitMs: 40, playerAfterMs: 60, availWaitMs: 200, codeScanDelayMs: 10, log() {} });
+            playerWaitMs: 40, playerAfterMs: 60, availWaitMs: 200, dynWaitMs: 60, codeScanDelayMs: 10, log() {} });
         assert.strictEqual(dq.opts.probe, false);
         await dq.start();
         await sleep(150);
         await assert.rejects(dq.audio.playNow('/x/audio.m4a'), /does not offer the media player "OapGenericMedia"/);
         await dq.audio.release();
-        // (a play looked for the dynamic player: there, but it does not answer - so iDrive 7's way, and its error)
+        // (the dynamic player's proxy is made at the start; it does not answer - so iDrive 7's way, and its error)
         assert.deepStrictEqual(sip.built, ['CommandControl|1', 'mp|OapGenericMedia', 'dyn|A']);
         // the page asks the dynamic player's first instance (reads only), and leaves out what a car has told
         calls.length = 0;
@@ -1885,15 +1885,20 @@ async function main() {
         assert.ok(lg.some((l) => l === 'waiting 2 s before the car\'s audio is asked for: the head unit is starting'), lg.join('|'));
         mkVideo('SettleWait1');
         fs.renameSync(path.join(cache, 'SettleWait1'), path.join(root, 'cache', 'SettleWait1'));
+        // a play now is not an error: it waits for the start to be over, then plays
+        calls.length = 0;
         cs.send({ cmd: 'play', id: 'SettleWait1', rect: '100x100' });
-        const e = await cs.waitFor((x) => x.ev === 'error', 4000);
-        assert.ok(/^the car's audio is not ready - waiting for the head unit to finish starting \(\d+ s more\) \(Settings > Diagnostics\)$/.test(e.msg), e.msg);
+        await sleep(700);
+        assert.ok(!cs.evs.some((x) => x.ev === 'error'), JSON.stringify(cs.evs.filter((x) => x.ev === 'error')));
+        assert.deepStrictEqual(sip.built, []);
         cs.send({ cmd: 'diag' });
         const m = await cs.waitFor((x) => x.ev === 'diag');
         assert.ok(m.lines.some((l) => /^NOT READY - starting \| stopped at: waiting for the head unit to finish starting/.test(l)), m.lines.join('\n'));
         fs.writeFileSync(upFile, '23.00 90.00\n');
         await waitUntil(() => ds.audio.diag.ready, 4000);
         assert.deepStrictEqual(sip.built, ['CommandControl|1', 'mp|OapGenericMedia']);
+        await waitUntil(() => called('playFile').length === 1, 4000);
+        assert.ok(!cs.evs.some((x) => x.ev === 'error'), 'the play that waited went through');
         cs.destroy();
         await ds.close();
         // iDrive 7 (no MainApp-21 on the unit): at once
@@ -1909,7 +1914,8 @@ async function main() {
         const sip = { buildProxy: async (cfg, inst) => {
             const px = await someip.buildProxy(cfg, inst);
             if (cfg.name !== 'dyn') return Object.assign(px, { isAvailable: async () => cfg.name === 'CommandControl', callMethod: async (m, a) => { dc.push({ on: cfg.name, m: m, a: a }); return m === 'connect' ? { mainConnectionID: 5, amError: 'E_OK' } : { amError: 'E_OK' }; } });
-            return Object.assign(px, { isAvailable: async () => inst === 'DynamicMediaPlayerMedia', subscribe: (x) => { subs[x.name] = x.onReceive; },
+            const born = Date.now();     // (as on a car: a proxy answers only a moment after it is made)
+            return Object.assign(px, { isAvailable: async () => inst === 'DynamicMediaPlayerMedia' && Date.now() - born > 300, subscribe: (x) => { subs[x.name] = x.onReceive; },
                 getValue: async (n) => { if (n === 'connectionState') return 'CS_CONNECTED'; if (n === 'playerState') return 'PLAYER_STATE_STOP'; throw new Error('Unknown method name \'get:' + n + '\''); },
                 callMethod: async (m, a) => {
                     dc.push({ on: 'dyn', m: m, a: a });

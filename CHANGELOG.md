@@ -1,5 +1,15 @@
 # Changelog
 
+## Service 0.4.9: iDrive 8, a play during the start waits; the dynamic player is given a moment to answer
+
+0.4.8 on a car, three minutes after its start: two plays ended with "the car's audio is not ready" (the first
+while the service kept away from the starting head unit, the second in the second its start ran), so the dynamic
+player was never asked. And its proxy, made a moment before, said "not available" where 0.4.7 had read "yes".
+
+- A play while the head unit is starting waits for the service's start to be over (the player shows loading)
+  rather than ending after 10 s.
+- The dynamic player's proxy is made at the service's start, and a play gives it 5 s to answer.
+
 ## Service 0.4.8: iDrive 8, a play goes through the car's dynamic media player
 
 0.4.7's pages from a car: the DynamicMediaPlayer's `DynamicMediaPlayerMedia` answers this service (playerState
