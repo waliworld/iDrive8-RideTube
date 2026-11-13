@@ -1,5 +1,29 @@
 # Changelog
 
+## Service 0.4.8: iDrive 8, a play goes through the car's dynamic media player
+
+0.4.7's pages from a car: the DynamicMediaPlayer's `DynamicMediaPlayerMedia` answers this service (playerState
+`PLAYER_STATE_STOP`, `CS_DISCONNECTED`), and the SDK inside BMW's own app shows how it is asked - `MediaPlayerImpl`:
+`createPlaylist({token, newPlaylist})`, `sendButtonEventDirect({token, button, action: "PRESS"})` then `"RELEASE"`,
+an empty playlist to stop, `playFile(file, startTime, mediaType, fileSize)` making the item `{fileName, metadata:
+[{key: "FILE_SIZE", value}]}`. Positions count from 1.
+
+- Where the car does not offer iDrive 7's player and its dynamic player answers, a play goes through it:
+  `getAudioFocus` (a token, kept alive with `heartBeat`), `createPlaylist` with the file as its one item
+  (`FILE_NAME`, `FILE_SIZE`), `PLAY`; pause, resume and stop as buttons, a seek with
+  `setCurrentItemPositionAndTime`; at the end an empty playlist and `releaseAudioFocus`. Its `playerState` and
+  `currentItemTime` are the MediaPlayer's, so the picture follows the sound as on iDrive 7. The audio manager is
+  not asked: the dynamic player has its own focus.
+- Not read from the car yet: how the SDK writes an item's union value and byte buffer for the binding
+  (`playlistConverter`). The likeliest forms are tried until the player takes one; which, and every answer of the
+  player, are on the Diagnostics page under *Last play through it*. If the player takes the file and does not
+  play, the play ends with that, and nothing of ours is left in the car's player.
+- The page's code reading now shows what is still open (`playlistConverter`, `timeOutHeartBeatTimer`, `heartBeat`,
+  `stringValue`, `setCurrentItemPositionAndTime`, the `ePlay` state), from the one app, not the app manager.
+- `dynamic: false` (the service's options) keeps to iDrive 7's way.
+
+Not heard on a car yet.
+
 ## Service 0.4.7: iDrive 8, how the car's own code asks its dynamic player to play
 
 0.4.6's pages printed the DynamicMediaPlayer whole: a player with its own audio focus and playlist -

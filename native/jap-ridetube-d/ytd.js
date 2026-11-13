@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.4.7';
+const VERSION = '0.4.8';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -91,7 +91,14 @@ function defaults() {
         // the three BMW apps known to play media (codeHomes) - some tens of files, not the 330 of every app - and only
         // when the Diagnostics page is opened. 'all' reads every app; false reads nothing.
         codeScan: 'targeted',
-        codeHomes: ['oap_12209', 'oap_12218', 'oap_12217'],
+        codeHomes: ['oap_12209'],
+        // 0.4.8: where the car does not offer iDrive 7's player, a play goes through its dynamic media player, asked as
+        // BMW's SDK asks it (Audio.playDynamic). false: never.
+        dynamic: true,
+        dynClientId: 'jap_ridetube8',
+        dynHeartbeatTimer: 10000,  // getAudioFocus's timeOutHeartBeatTimer (its unit is not known: far above our beat either way)
+        dynHeartbeatMs: 3000,      // heartBeat(token) this often while we hold the focus
+        dynStartMs: 8000,          // how long the player is given to say it plays
         diagFull: false,      // the page's sections a car has already told (the description, the policies, the processes, the files)
         playerWaitMs: 3000,   // at the start, the media player given this long to answer before another is looked for
         probeMs: 3000,        // ... and the players asked for this long
@@ -1301,10 +1308,24 @@ Audio.prototype.playNow = async function (file) {
         if (this.opts.probe && (!(await this.answers(this.mp)) || (this.used && this.used.inst !== this.conf().inst))) {
             try { await this.findPlayer(ms(this.opts.probeAgainMs, 500)); } catch (e) { this.note('looking for the media player failed: ' + errText(e)); }
         }
+        play.player = await this.answers(this.mp);
+        // iDrive 8: no such player, but a dynamic one that answers - the play goes through it
+        if (!play.player) {
+            const px = await this.dynReady();
+            if (px) {
+                play.route = 'the dynamic media player';
+                try { await this.playDynamic(px, file); } catch (e) {
+                    // (nothing of ours is left behind in the car's player)
+                    if (this.connId === 'dyn') this.connId = null;
+                    await this.releaseDynamic();
+                    throw e;
+                }
+                return;
+            }
+        }
         // a route the audio manager's lists did not settle at the start: looked at again
         if (this.srcListed === false || this.sinkListed === false) await this.route(this.cc, this.conf());
         play.route = this.src + '>' + this.sink;
-        play.player = await this.answers(this.mp);
         const r = await call(this.cc, 'audio connect', 'connect', { sourceID: this.src, sinkID: this.sink });
         play.connect = JSON.stringify(r);
         this.opts.log('connect ' + JSON.stringify(r));
@@ -1324,15 +1345,175 @@ Audio.prototype.playNow = async function (file) {
     } catch (e) {
         play.error = errText(e);
         // the player not offered on this head unit: that is what the driver is told, whatever the call answered
-        if (play.player === false && play.connect && !play.playFile) {
+        if (this.diag.dynPlay && play.route === 'the dynamic media player') { /* its own words */ } else if (play.player === false && play.connect && !play.playFile) {
             e.message = 'the car does not offer the media player "' + (this.used && this.used.inst) + '" on this head unit (Settings > Diagnostics)';
             play.error += ' | the player does not answer';
         }
         throw e;
     }
 };
+/* iDrive 8 does not offer iDrive 7's OapGenericMedia player: its apps play through the DynamicMediaPlayer (service
+ * 0xb0c0), which answers this service too. It is asked as BMW's SDK asks it (MediaPlayerImpl in the apps' code, read
+ * on a car with 0.4.7): getAudioFocus -> a token; createPlaylist({ token, newPlaylist }) with the file as an item;
+ * sendButtonEventDirect PRESS then RELEASE; createPlaylist([]) to stop; releaseAudioFocus. Its playerState and
+ * currentItemTime are the MediaPlayer's (PLAYER_STATE_PLAY, { elapsed, total }), so the daemon hears the same.
+ * What the code read did not show - how a playlist item's union value and byte buffer are written for the binding -
+ * is tried in the likeliest forms until the player takes one (kept for the next play). Every answer goes to the log
+ * and the Diagnostics page. */
+Audio.prototype.dynInst = function () {
+    const insts = this.dyn && this.dyn.file ? instancesOf(this.dyn.cfg) || [] : [];
+    return insts.filter((n) => /^DynamicMediaPlayerMedia$/.test(n))[0] || insts[0] || null;
+};
+/* The dynamic player's proxy when it is there and answers; else null. */
+Audio.prototype.dynReady = async function () {
+    if (this.opts.dynamic === false) return null;
+    try {
+        if (!this.dyn) await this.dynamic(false);
+        const inst = this.dynInst();
+        if (!inst) return null;
+        const px = await this.proxy('DynamicMediaPlayer', this.dyn.cfg, inst, this.dyn.file, 4000);
+        return (await this.answers(px)) ? px : null;
+    } catch (e) { this.note('the dynamic media player could not be reached: ' + errText(e)); return null; }
+};
+/* Its fields and events, heard once per proxy: the last of each kept for the page; while a play goes through it,
+ * its state, time and playback errors go to the daemon's handlers. */
+Audio.prototype.listenDyn = function (px) {
+    if (this.heard.indexOf(px) >= 0) return;
+    this.heard.push(px);
+    const d = this.diag, h = this.h;
+    d.dynEvents = d.dynEvents || {};
+    const to = (k, fn) => (v) => {
+        d.dynEvents[k] = v;
+        if (this.connId !== 'dyn' || !fn) return;
+        try { fn(v); } catch (e) { this.opts.log('someip handler: ' + (e && e.stack || e)); }
+    };
+    const sub = (name, k, fn) => { try { px.subscribe({ name: name, onReceive: to(k, fn) }); } catch (e) { this.opts.log('dynamic player: no ' + name + ' (' + errText(e) + ')'); } };
+    sub('playerState', 'state', h.state);
+    sub('currentItemTime', 'time', h.time);
+    sub('playbackErrorEvent', 'error', (v) => { if (v && v.event && v.event !== 'NO_ERROR') h.error(v); });
+    sub('currentAudioFocus', 'focus', null);
+    sub('connectionState', 'connection', null);
+};
+Audio.prototype.dynCall = function (m, a, ms) {
+    const px = this.dynPx;
+    return Promise.resolve().then(() => px.callMethod(m, a, ms || 5000));
+};
+Audio.prototype.dynButton = async function (b) {
+    const one = async (action) => {
+        try {
+            const r = await this.dynCall('sendButtonEventDirect', { token: this.dynToken, button: b, action: action }, 3000);
+            if (!r || r.dynMediaPlayerError !== 'OK') this.opts.log('dynamic player: ' + b + ' ' + action + ' ' + JSON.stringify(r));
+            return r;
+        } catch (e) { this.opts.log('dynamic player: ' + b + ' ' + action + ' failed: ' + errText(e)); return null; }
+    };
+    const r = await one('PRESS');
+    await sleep(80);
+    await one('RELEASE');
+    return r;
+};
+Audio.prototype.playDynamic = async function (px, file) {
+    const d = this.diag, steps = [];
+    const dp = d.dynPlay = { file: path.basename(file), steps: steps, enc: null, error: null };
+    const say = (what, v) => {
+        let t;
+        try { t = typeof v === 'string' ? v : JSON.stringify(v); } catch (e) { t = String(v); }
+        t = (what + ' ' + t).slice(0, 240);
+        steps.push(t);
+        this.opts.log('dynamic player: ' + t);
+    };
+    const fail = (short, e) => { const x = new Error('the car\'s dynamic player ' + short + ' (Settings > Diagnostics)'); dp.error = short + (e ? ': ' + errText(e) : ''); return x; };
+    const ok = (r) => !!r && r.dynMediaPlayerError === 'OK';
+    const value = async (name) => { try { return await withTimeout(Promise.resolve().then(() => px.getValue(name, 1500)), 2000, name); } catch (e) { return undefined; } };
+    this.dynPx = px;
+    this.listenDyn(px);
+    // 1. the focus: a token, kept alive by our beat
+    if (!this.dynToken) {
+        let r;
+        try { r = await this.dynCall('getAudioFocus', { clientId: this.opts.dynClientId, clientName: 'RideTube', timeOutHeartBeatTimer: this.opts.dynHeartbeatTimer }); } catch (e) { say('getAudioFocus failed', errText(e)); throw fail('refused the audio focus', e); }
+        say('getAudioFocus', r);
+        if (!ok(r) || !r.token) throw fail('gave no audio focus (' + (r && r.dynMediaPlayerError) + ')');
+        this.dynToken = r.token;
+        this.dynBeat = setInterval(() => { this.dynCall('heartBeat', { token: this.dynToken }, 2000).catch((e) => { if (!this.dynBeatSaid) this.opts.log('dynamic player: heartBeat failed: ' + errText(e)); this.dynBeatSaid = true; }); }, this.opts.dynHeartbeatMs);
+        if (this.dynBeat.unref) this.dynBeat.unref();
+        // connected and focused, as the SDK waits for it (4 s; then on anyway: what follows says more)
+        const end = Date.now() + 4000;
+        let conn, focus;
+        for (;;) {
+            conn = await value('connectionState');
+            focus = await value('currentAudioFocus');
+            if (conn === 'CS_CONNECTED' || (focus && focus.token === this.dynToken && focus.status === 'HAS_FOCUS') || Date.now() > end) break;
+            await sleep(250);
+        }
+        say('then', { connectionState: conn, currentAudioFocus: focus });
+    }
+    this.connId = 'dyn';
+    // 2. the playlist: our file as its one item (positions count from 1, as the SDK's)
+    let size = 0;
+    try { size = fs.statSync(file).size; } catch (e) { /* unknown */ }
+    const idBytes = Buffer.from(path.basename(path.dirname(file)) || 'ridetube');
+    const forms = [
+        { name: 'wrapped values, id as a Buffer', wrap: true, id: idBytes },
+        { name: 'wrapped values, id as an array', wrap: true, id: Array.prototype.slice.call(idBytes) },
+        { name: 'plain values, id as a Buffer', wrap: false, id: idBytes },
+        { name: 'plain values, id as an array', wrap: false, id: Array.prototype.slice.call(idBytes) },
+    ];
+    if (this.dynForm) forms.sort((x, y) => (y.name === this.dynForm ? 1 : 0) - (x.name === this.dynForm ? 1 : 0));
+    let last = null;
+    for (const f of forms) {
+        const item = { pos: 1, id: f.id, metadata: [
+            { key: 'FILE_NAME', value: f.wrap ? { stringValue: file } : file },
+            { key: 'FILE_SIZE', value: f.wrap ? { numeric: size } : size },
+        ] };
+        try {
+            const r = await this.dynCall('createPlaylist', { token: this.dynToken, newPlaylist: [item] });
+            say('createPlaylist (' + f.name + ')', r);
+            last = r && r.dynMediaPlayerError;
+            if (ok(r)) { dp.enc = this.dynForm = f.name; break; }
+            if (last === 'TOKEN_NOT_VALID' || last === 'CONNECTION_STATE_NOT_VALID') break;   // not the item's form
+        } catch (e) { say('createPlaylist (' + f.name + ') failed', errText(e)); last = errText(e); }
+    }
+    if (!dp.enc) throw fail('did not take the playlist (' + String(last).slice(0, 80) + ')');
+    // 3. play, and the player given dynStartMs to say so; once more with the item's position set if it does not
+    const playing = async (ms) => {
+        const end = Date.now() + ms;
+        for (;;) {
+            const st = (d.dynEvents && d.dynEvents.state) || await value('playerState');
+            if (st === 'PLAYER_STATE_PLAY') return true;
+            if (Date.now() > end) return false;
+            await sleep(200);
+        }
+    };
+    if (d.dynEvents) { delete d.dynEvents.state; delete d.dynEvents.error; }
+    say('PLAY', await this.dynButton('PLAY'));
+    let up = await playing(Math.min(3000, this.opts.dynStartMs));
+    if (!up) {
+        let r;
+        try { r = await this.dynCall('setCurrentItemPositionAndTime', { token: this.dynToken, newPosition: 1, newTimeElapsed: 0 }, 3000); } catch (e) { r = 'failed: ' + errText(e); }
+        say('setCurrentItemPositionAndTime', r);
+        say('PLAY again', await this.dynButton('PLAY'));
+        up = await playing(Math.max(0, this.opts.dynStartMs - 3000));
+    }
+    say('then', { playerState: (d.dynEvents && d.dynEvents.state) || await value('playerState'), currentItemTime: d.dynEvents && d.dynEvents.time, error: d.dynEvents && d.dynEvents.error });
+    if (!up) throw fail('took the file but does not play it' + (d.dynEvents && d.dynEvents.error && d.dynEvents.error.event ? ' (' + d.dynEvents.error.event + ')' : ''));
+};
+/* The end of a play through the dynamic player: an empty playlist (the SDK's stop), the focus given back. */
+Audio.prototype.releaseDynamic = async function () {
+    const token = this.dynToken;
+    if (this.dynBeat) clearInterval(this.dynBeat);
+    this.dynBeat = null;
+    this.dynToken = null;
+    if (!token || !this.dynPx) return;
+    for (const c of [['createPlaylist', { token: token, newPlaylist: [] }], ['releaseAudioFocus', { token: token }]]) {
+        try { this.opts.log('dynamic player: ' + c[0] + (c[0] === 'createPlaylist' ? ' (empty) ' : ' ') + JSON.stringify(await this.dynCall(c[0], c[1], 3000))); } catch (e) { this.opts.log('dynamic player: ' + c[0] + ' failed: ' + errText(e)); }
+    }
+};
 // playFile again on the live connection: after a STOP the player needs the file, not PLAY
 Audio.prototype.replay = function (file) {
+    if (this.connId === 'dyn') {
+        const q = this.playDynamic(this.dynPx, file);
+        this.pending = q.catch(() => {});
+        return q;
+    }
     const p = this.mp.callMethod('playFile', { path: file, languageCode: 7695972 }, 5000).then((r) => {
         this.opts.log('replay ' + JSON.stringify(r));
         if (!r || r.EntError !== 'OK') throw new Error('playFile: ' + (r && r.EntError));
@@ -1341,11 +1522,17 @@ Audio.prototype.replay = function (file) {
     return p;
 };
 Audio.prototype.button = function (b) {
+    if (this.connId === 'dyn') return this.dynButton(b);
     if (!this.mp) return Promise.resolve();
     return this.mp.callMethod('sendButtonEvent', { button: b, action: 'PRESS' }, 3000)
         .catch((e) => this.opts.log(b + ' failed: ' + e));
 };
 Audio.prototype.seek = function (ms) {
+    if (this.connId === 'dyn') {
+        return this.dynCall('setCurrentItemPositionAndTime', { token: this.dynToken, newPosition: 1, newTimeElapsed: ms }, 3000)
+            .then((r) => { if (!r || r.dynMediaPlayerError !== 'OK') this.opts.log('dynamic player: seek ' + JSON.stringify(r)); })
+            .catch((e) => this.opts.log('dynamic player: seek failed: ' + errText(e)));
+    }
     if (!this.mp) return Promise.resolve();
     return this.mp.callMethod('setTime', { newTimeElapsed: ms }, 3000).catch((e) => this.opts.log('setTime failed: ' + e));
 };
@@ -1354,6 +1541,12 @@ Audio.prototype.release = async function () {
     if (this.pending) await this.pending;
     if (this.connId === null) return;
     const id = this.connId;
+    if (id === 'dyn') {
+        await this.dynButton('STOP');
+        this.connId = null;
+        await this.releaseDynamic();
+        return;
+    }
     this.connId = null;
     await this.button('STOP');
     try {
@@ -1949,8 +2142,10 @@ Daemon.prototype.scanCode = async function () {
         let homes = [];
         try { homes = fs.readdirSync(o.oapRoot).filter((n) => /^oap_\d+$/.test(n)).sort(); } catch (e) { /* none */ }
         // the app manager's own code first (it is what plays for the apps on iDrive 8), then the apps
-        (o.mainapps || []).forEach((m) => walk(path.join(m.root, 'src'), 'the app manager', 4));
-        (o.mainapps || []).forEach((m) => {
+        // (targeted: the app manager's files said nothing of the player on a car - the SDK in the app does)
+        const mgr = o.codeScan === 'targeted' ? [] : o.mainapps || [];
+        mgr.forEach((m) => walk(path.join(m.root, 'src'), 'the app manager', 4));
+        mgr.forEach((m) => {
             let names = [];
             try { names = fs.readdirSync(m.root); } catch (e) { return; }
             names.filter((n) => /\.js$/.test(n)).forEach((n) => list.push({ p: path.join(m.root, n), label: 'the app manager' }));
@@ -2002,18 +2197,25 @@ Daemon.prototype.scanCode = async function () {
                     c.snips.push({ kind: kind, where: app, text: text.slice(Math.max(0, x.index - before), x.index + after).replace(/\s+/g, ' ') });
                 }
             };
-            // (how the car's own code asks its dynamic player to play: the calls of its interface, 0.4.6's pages)
-            grab('createPlaylist', /createPlaylist/g, 2, 350, 550);
-            grab('getAudioFocus', /getAudioFocus/g, 2, 350, 550);
-            grab('addToPlaylist', /addToPlaylist/g, 1, 250, 450);
-            grab('sendButtonEventDirect', /sendButtonEventDirect/g, 1, 250, 450);
-            grab('heartBeat', /heartBeat["'`]/g, 1, 250, 350);
-            grab('FILE_NAME', /FILE_NAME/g, 2, 300, 400);
-            grab('listOfMainSources', /listOfMainSources/g, 1, 250, 400);
-            grab('DynamicMediaPlayer', /dynamicmediaplayer/gi, 4, 250, 450);
-            grab('playFile', /playFile\s*[(:=]/g, 2, 350, 400);
-            grab('OapGenericMedia', /OapGenericMedia["'`]/g, 2, 300, 350);
-            grab('GenericMediaPlayer', /GenericMediaPlayer["'`]/g, 1, 300, 350);
+            // (what 0.4.7's pages left open of how BMW's SDK asks the dynamic player: how it turns an item into a
+            // playlist entry, how it asks for the focus and keeps it, how a play starts)
+            if (o.codeScan === 'targeted') {
+                grab('playlistConverter', /playlistConverter\s*[(=]/g, 3, 150, 750);
+                grab('timeOutHeartBeatTimer', /timeOutHeartBeatTimer/g, 2, 450, 450);
+                grab('generateItemId', /generateItemId\s*\(\s*\)\s*\{/g, 1, 60, 400);
+                grab('heartBeat', /\.heartBeat\s*\(/g, 1, 350, 350);
+                grab('stringValue', /stringValue/g, 2, 350, 350);
+                grab('setCurrentItemPositionAndTime', /\.setCurrentItemPositionAndTime\s*\(/g, 1, 450, 350);
+                grab('releaseAudioFocus', /\.releaseAudioFocus\s*\(/g, 1, 350, 300);
+                grab('ePlay', /ePlay\s*:/g, 2, 200, 500);
+                grab('playFile', /playFile\(e,t,i,a\)\{/g, 1, 20, 900);
+            } else {
+                grab('createPlaylist', /createPlaylist/g, 2, 350, 550);
+                grab('DynamicMediaPlayer', /dynamicmediaplayer/gi, 4, 250, 450);
+                grab('playFile', /playFile\s*[(:=]/g, 2, 350, 400);
+                grab('OapGenericMedia', /OapGenericMedia["'`]/g, 2, 300, 350);
+                grab('GenericMediaPlayer', /GenericMediaPlayer["'`]/g, 1, 300, 350);
+            }
             const dynRe = /dynamicmediaplayer/gi, callRe = /\b(callMethod|getValue|setValue|subscribe)\(\s*(?:\{\s*name\s*:\s*)?["'`](\w+)["'`]([^;]{0,90})/g;
             let y, spans = 0;
             while ((y = dynRe.exec(text)) && spans++ < 40) {
@@ -2108,6 +2310,13 @@ Daemon.prototype.diagLines = async function () {
             if (o.diagFull) short.forEach((l) => out.push(l));
             else out.push('Its description: ' + short.filter((l) => /^(methods|fields|events) \(/.test(l)).map((l) => l.split(':')[0]).join(', ') + ' (printed whole by 0.4.6)');
         }
+    }
+    if (d.dynPlay) {
+        if (!dyn) out.push('# The dynamic media player');
+        out.push('Last play through it: ' + d.dynPlay.file + (d.dynPlay.error ? ' | FAILED: ' + d.dynPlay.error : ' | started') + (d.dynPlay.enc ? ' | the item written as: ' + d.dynPlay.enc : ''));
+        d.dynPlay.steps.forEach((x, i) => out.push((i + 1) + '. ' + x));
+        const ev = d.dynEvents || {};
+        out.push('Its events now: ' + (Object.keys(ev).map((k) => k + ' ' + js(ev[k])).join(' | ') || 'none'));
     }
     if (o.diagFull) {
         out.push('# Who may use them');
