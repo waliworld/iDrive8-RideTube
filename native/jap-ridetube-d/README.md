@@ -84,13 +84,18 @@ on such a car works through the ways, the quick ones first, and keeps the first 
 - `FocusRoute` (`focus:<instance>|<device>`): the audio focus of a DynamicMediaPlayer instance (`getAudioFocus`,
   kept alive by `heartBeat`) makes the car connect that player's source; the scan again, and the same player on a
   device that then takes samples.
-- `DynRoute` (`dyn:<instance>`): the instance's playlist. `createPlaylist` in each form (BMW's own first) with the
-  file in each place (its path, the app's `data` folder, `file://`, `/run`, a local HTTP server), then each way to
-  start it. A way counts once the player says PLAY or its time moves. Minutes.
+- `DynRoute` (`dyn:<instance>`): the instance's playlist. The first car gives the focus to
+  `getAudioFocus(<our app>, RideTube, 0)` (timer 0, as BMW's code passes for the entertainment instances) and
+  answers `OK` to `createPlaylist` while its list stays empty. So first BMW's item with each id an app could give
+  it on that instance (0.5.2: four bytes - the app's number, the instance's type, a count) at the file's place, in
+  the car's store for online media (`/mnt/share/ent/oe`) and in the app's `data` folder, a moment each; then
+  `createPlaylist` in each form with the file in each place (also `file://`, `/run`, a local HTTP server), then
+  each way to start it, BMW's own first. A way counts once the player says PLAY or its time moves. Minutes.
 - `sdkread.js` reads, on the car, how BMW's own SDK asks the dynamic player: it loads an installed app's player
   class in a `vm` sandbox with every dependency replaced by a recording stub, in a child running as `nobody` with
-  no environment, and records the item it builds, the arguments of `getAudioFocus`, the heartbeat and what starts a
-  playlist. The result stays on the car (`state/sdk.json`, the Diagnostics page). No BMW code is in this repository.
+  no environment, and records the item it builds, the ids its `generateItemId` gives per instance, the arguments
+  of `getAudioFocus`, the heartbeat and what it asks after its playlist. The result stays on the car
+  (`state/sdk.json`, the Diagnostics page). No BMW code is in this repository.
 - The driver's verdict: the app's "No sound?" (`nosound`) marks the way that claims to play as silent and the same
   video goes on with the next way.
 - `ytalsa.py` and the router: a device is opened blocking, written to non-blocking, started by hand, never prepared

@@ -2,7 +2,12 @@
 /* A browserify bundle shaped like an installed app's, for the tests of sdkread.js: an app module, an SDK-like player
  * class (our own code, written in the manner of a TypeScript build: __importDefault, a logger from a logging module,
  * a state service, a proxy from a builder that needs the native SOME/IP binding) and its helpers.
- *   bundle({ minified, idAs: 'buffer' | 'array' | 'uint8', union: 'wrapped' | 'typed' | 'plain', brokenLogging, loggerThrows, noClass, asyncProxy }) -> text */
+ *   bundle({ minified, idAs: 'buffer' | 'array' | 'uint8', union: 'wrapped' | 'typed' | 'plain', brokenLogging, loggerThrows, noClass, asyncProxy }) -> text
+ *   bundle({ id8: true, noTypeMap, byHandlers }): the class (byHandlers: its init fails against stand-ins and
+ *   subscribes to nothing - only its own handlers of the focus and the connection move it on) in the manner iDrive 8's apps were seen to have it - made with
+ *   { instance, clientName, lumOptions }, an item id of four bytes that carries a number made of the app's logging id
+ *   and a type per player instance (a static map), the focus asked with timer 0 for the entertainment instances, an
+ *   init and a connect, the start of a playlist an arrow function set in the constructor. */
 
 const PRELUDE = '(function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;' +
     'if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module \'"+i+"\'");throw a.code="MODULE_NOT_FOUND",a}' +
@@ -90,6 +95,97 @@ class MediaPlayerImpl extends events_1.EventEmitter {
 }
 exports.default = MediaPlayerImpl;
 `;
+    const player8 = `
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) { return (mod && mod.__esModule) ? mod : { "default": mod }; };
+Object.defineProperty(exports, "__esModule", { value: true });
+const events_1 = require("events");
+const SDKError_1 = __importDefault(require("../errors/SDKError"));
+const logging = require("../logging/logging");
+const someipBuilders_1 = require("../someip/someipBuilders");
+const StateService_1 = __importDefault(require("./StateService"));
+const logger = logging.getSDKLogger();
+const check = (r) => { if (!r || r.dynMediaPlayerError !== "OK") throw new SDKError_1.default("the player said " + (r && r.dynMediaPlayerError)); return r; };
+class MediaPlayerImpl extends events_1.EventEmitter {
+    constructor(options) {
+        super();
+        this.instance = options.instance;
+        this.clientName = options.clientName;
+        this.lumEnabled = !!(options.lumOptions && options.lumOptions.enabled === true);
+        this.appId = logging.appId();
+        this.convertedLoggingId = logging.convertLoggingId(logging.loggingId());
+        this.heartBeatTimeoutMs = 8000;
+        this.heartBeatIntervalMs = 2000;
+        this.cachedPlaylist = [];
+        this.stateService = new StateService_1.default((s) => this.emit("stateChanged", s));
+        this.mediaPlayerProxy = someipBuilders_1.buildProxy("DynamicMediaPlayer", this.instance);
+        this.audioManagerProxy = someipBuilders_1.buildProxy("CommandControl", "1");
+        this.startPlaybackWithPlayItem = (position, time) => this.mediaPlayerProxy.setCurrentItemPositionAndTime({ token: this.cachedToken, newPosition: position, newTimeElapsed: time }).then(check)
+            .then(() => this.mediaPlayerProxy.sendButtonEventDirect({ token: this.cachedToken, button: "PLAY", action: "PRESS" })).then(check).then(() => this.setSoundProperty());
+    }
+    setSoundProperty() { logger.info("setSoundProperty"); return this.audioManagerProxy.setMainSinkSoundProperty({ sinkID: 1024, soundProperty: { type: "SP_AVSYNC_TARGET", value: this.mediaType === "Video" ? 1 : 0 } }); }
+    get publicState() { return this.stateService.state; }
+    get state() { return this.publicState; }
+    init() {
+        ${o.byHandlers ? 'return this.subscriptions.ready.catch(() => {});' : `this.mediaPlayerProxy.subscribe({ name: "connectionState", onReceive: (v) => this.handleConnectionStateChange(v) });
+        this.mediaPlayerProxy.subscribe({ name: "playerState", onReceive: (v) => { if (v === "PLAYER_STATE_PLAY") this.stateService.send("ePlaying"); } });
+        return Promise.resolve();`}
+    }
+    handleCurrentAudioFocusChange(f) { this.focusIsOurs = !!f && f.token === this.cachedToken && f.status === "HAS_FOCUS"; }
+    handleConnectionStateChange(v) { if (v === "CS_CONNECTED" && ${o.byHandlers ? 'this.focusIsOurs' : 'true'}) this.stateService.send("eConnected"); }
+    connect() { this.stateService.send("eConnecting"); return this.getAudioFocus(); }
+    getAudioFocus() {
+        logger.info(\`MediaPlayerImpl(\${this.instance}) getAudioFocus\`);
+        return this.mediaPlayerProxy.getAudioFocus({ clientId: this.appId, clientName: this.clientName || this.appId, timeOutHeartBeatTimer: ["Entertainment", "EntertainmentTemp", "EntertainmentTempLum"].includes(this.instance) ? 0 : this.heartBeatTimeoutMs })
+            .then(check).then(({ token }) => { this.cachedToken = token; return this.mediaPlayerProxy.setAutoplay({ token, autoplay: this.lumEnabled }); }).then(check);
+    }
+    generateItemId() {
+        const type = MediaPlayerImpl.sourceToItemTypeMap[this.instance], count = MediaPlayerImpl.itemIdCounter++ % 65536;
+        return (Math.floor(this.convertedLoggingId / 256) << 28) + (type << 24) + (this.convertedLoggingId % 256 << 16) + count;
+    }
+    playlistItemConverter(item, pos) {
+        const id = Buffer.alloc(4);
+        id.writeInt32BE(item.id | 0, 0);
+        const metadata = (item.metadata || []).map((m) => ({ key: m.key, value: { numeric: m.value } }));
+        metadata.push({ key: "ITEM_ID", value: { id } });
+        metadata.push({ key: "FILE_NAME", value: { stringValue: item.fileName } });
+        return { id, metadata, pos };
+    }
+    playlistConverter(list, start) { return list.map((item, i) => this.playlistItemConverter(item, start + i)); }
+    setPlaylist(list, mediaType) {
+        this.mediaType = mediaType;
+        const withIds = list.map((e) => Object.assign({}, e, { id: e.id === undefined ? this.generateItemId() : e.id }));
+        return this.mediaPlayerProxy.createPlaylist({ token: this.cachedToken, newPlaylist: this.playlistConverter(withIds, 1) }).then(check).then(() => { this.cachedPlaylist = withIds; });
+    }
+    playFile(file, startTime, mediaType, size) {
+        if (this.publicState !== "Connected") throw new SDKError_1.default(\`MediaPlayerImpl(\${this.instance})[\${this.publicState}] - command ePlay not allowed\`);
+        this.stateService.send("ePlay");
+        const item = { fileName: file };
+        if (size) item.metadata = [{ key: "FILE_SIZE", value: size }];
+        return this.setPlaylist([item], mediaType).then(() => this.startPlaybackWithPlayItem(1, startTime));
+    }
+}
+MediaPlayerImpl.itemIdCounter = 0;
+${o.noTypeMap ? '' : 'MediaPlayerImpl.sourceToItemTypeMap = { Entertainment: 1, EntertainmentTemp: 2, EntertainmentTempLum: 3, Interrupt: 5 };'}
+exports.default = MediaPlayerImpl;
+`;
+    const logging8 = 'const path = require("path"); const dlt = require("dlt-native");' +
+        ' let id; try { id = path.basename(path.dirname(process.argv[1])); } catch (e) { dlt.log(2, `Could not determine the appID due to ${e}`); id = "unknown"; }' +
+        ' exports.appId = () => id; exports.loggingId = () => "OA15"; exports.convertLoggingId = (text) => parseInt(String(text).slice(1), 16);' +
+        ' exports.getSDKLogger = () => ({ info: (m) => dlt.log(4, m), error: (m) => dlt.log(2, m) });';
+    if (o.id8) {
+        const mods8 = [
+            [1, 'const mp = require("./MediaPlayerImpl"); class VideoView { play() { const e = this.mediaRepository.getVideoPath(this.message.uuid); return this.onlineApp.registerAudioFocus().then(() => this.mediaPlayer.playFile(e, 0, "Video")); } } module.exports = [mp, VideoView];', '{"./MediaPlayerImpl":3}'],
+            [3, player8, '{"events":undefined,"../errors/SDKError":4,"../logging/logging":5,"../someip/someipBuilders":6,"./StateService":7}'],
+            [4, '"use strict"; class SDKError extends Error { static reject(m) { return Promise.reject(new SDKError(m)); } } exports.default = SDKError; exports.__esModule = true;', '{}'],
+            [5, logging8, '{"path":undefined,"dlt-native":undefined}'],
+            [6, 'const someip = require("someip"); exports.buildProxy = (name, inst) => someip.buildProxy(name, inst);', '{"someip":undefined}'],
+            [7, '"use strict"; const NEXT = { Disconnected: { eConnecting: "Connecting" }, Connecting: { eConnected: "Connected" }, Connected: { ePlay: "Starting" }, Starting: { ePlaying: "Playing" }, Playing: {} };' +
+                ' class StateService { constructor(on) { this.state = "Disconnected"; this.on = on; } send(ev) { const n = (NEXT[this.state] || {})[ev]; if (n) { this.state = n; this.on(n); } } } exports.default = StateService; exports.__esModule = true;', '{}'],
+            [8, 'class MediaRepository { getVideoPath(uuid) { return this.root + "/media/" + uuid + ".mp4"; } } module.exports = MediaRepository;', '{}'],
+        ];
+        return PRELUDE + '({' + mods8.map((m) => m[0] + ':[function(require,module,exports){\n' + m[1] + '\n},' + m[2] + ']').join(',') + '},{},[1]);\n';
+    }
     const mods = [
         [1, 'const mp = require("oap-sdk/src/media/mediaplayer"); const fs = require("fs"); fs.writeFileSync("/tmp/rt-test-must-not-exist", "the app ran"); module.exports = mp;', '{"oap-sdk/src/media/mediaplayer":2,"fs":undefined}'],
         [2, '"use strict"; const MediaPlayerImpl_1 = require("./MediaPlayerImpl"); class HmiMediaPlayerImpl { constructor(a, b) { this.player = new MediaPlayerImpl_1.default(a, b); } } exports.HmiMediaPlayerImpl = HmiMediaPlayerImpl;', '{"./MediaPlayerImpl":3}'],

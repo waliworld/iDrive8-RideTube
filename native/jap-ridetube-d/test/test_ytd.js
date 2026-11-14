@@ -1449,6 +1449,14 @@ async function main() {
         assert.ok(!global.__entryRan, 'the bundle\'s entry ran');
         assert.strictEqual(a.diag.cc.file, cat + ' (generator of ' + bundle + ')');
         assert.ok(lines.some((l) => l === 'the description of ' + MP + ' was made from ' + cat + ' (generator of ' + bundle + ')'), lines.join('|'));
+        // which of the catalog's interfaces has a method BMW's code was read to ask: named with its instances;
+        // one that none has is said so; nothing is asked of the car for it
+        const before = built.length;
+        fs.writeFileSync(cat, JSON.stringify({ interfaces: { [CC]: { n: 'cc', methods: { setMainSinkSoundProperty: {} } }, [MP]: { n: 'mp' } } }));
+        assert.ok(new RegExp('^setMainSinkSoundProperty: ' + CC.replace(/\./g, '\\.') + ' \\| service .* \\| instances: 1, OapGenericMedia').test(a.ifacesWith('setMainSinkSoundProperty')[0]), a.ifacesWith('setMainSinkSoundProperty').join('|'));
+        assert.deepStrictEqual(a.ifacesWith('setNothing'), ['setNothing: in no interface of the catalog']);
+        assert.strictEqual(built.length, before);
+        fs.writeFileSync(cat, JSON.stringify({ interfaces: { [CC]: { n: 'cc' }, [MP]: { n: 'mp' } } }));
         // the catalog has no such interface
         fs.writeFileSync(cat, JSON.stringify({ interfaces: { [CC]: { n: 'cc' } } }));
         a = mk({});

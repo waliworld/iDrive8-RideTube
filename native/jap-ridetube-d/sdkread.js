@@ -90,12 +90,15 @@ async function read(o) {
     out.stamp = st ? st.size + ':' + Math.floor(st.mtime.getTime() / 1000) : String(found.text.length);
     const ids = typeof o.uid === 'number' ? { uid: o.uid, gid: typeof o.gid === 'number' ? o.gid : o.uid } : {};
     const ms = o.timeoutMs || 25000;
+    // (the numbers an app's item ids could carry: the caller's, which may depend on the app whose code this is)
+    let logIds = [];
+    try { logIds = (typeof o.logIds === 'function' ? o.logIds(found.home) : o.logIds) || []; } catch (e) { logIds = []; }
     const res = await new Promise((resolve) => {
         let child, done = false, so = '', se = '';
         const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
         const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* gone */ } finish({ error: 'reading the SDK\'s player took over ' + Math.round(ms / 1000) + ' s' }); }, ms);
         try {
-            child = cp.spawn(o.node || process.execPath, [__filename, 'worker', JSON.stringify({ sample: SAMPLE })],
+            child = cp.spawn(o.node || process.execPath, [__filename, 'worker', JSON.stringify({ sample: SAMPLE, logIds: logIds })],
                 Object.assign(ids, { cwd: '/', env: {}, stdio: ['pipe', 'pipe', 'pipe'] }));
         } catch (e) { return finish({ error: 'the reader could not be started: ' + e.message }); }
         child.on('error', (e) => finish({ error: 'the reader could not be started: ' + e.message }));
@@ -116,6 +119,8 @@ async function read(o) {
     if (!res.ok && !(res.near && res.near.length)) out.near = textNear(found.text);
     // how the focus is asked for, wherever in the bundle that is written (the app's own part too): as text, nothing run
     out.near = textFocus(found.text).concat(out.near || []);
+    // how a file is played after the focus: the item's id, where the file is, what starts it - as text, nothing run
+    out.play = textPlay(found.text);
     out.ok = !!res.ok && !res.error;
     if (!out.ok && !out.error) out.error = (res.notes && res.notes[0]) || 'the SDK\'s player was not understood';
     return out;
@@ -137,6 +142,39 @@ function textFocus(text) {
             out.push({ what: k[0], text: text.slice(Math.max(0, at - k[2]), at + k[3]).replace(/\s+/g, ' ') });
         }
     });
+    return out;
+}
+
+/* The stretches of a bundle's text that say how a file is played once the focus is there: what starts the playlist,
+ * how the number in an item's id is made of the app's logging id, the id's type per player instance, where an app
+ * keeps the file it plays, how the SDK finds the app's id. [{ what, text }]. (The class's own methods - its item
+ * converter, setPlaylist, init, connect - are read from the class itself: the child's `methods`.) */
+function textPlay(text) {
+    const out = [];
+    const def = (n) => new RegExp('(?:^|[^\\w$.])' + n + '\\s*\\(\\s*(?:[\\w$]+(?:\\s*=\\s*[^,)]{1,12})?(?:\\s*,\\s*[\\w$]+(?:\\s*=\\s*[^,)]{1,12})?)*)?\\s*\\)\\s*\\{', 'g');
+    const add = (what, re, before, after, max) => {
+        re.lastIndex = 0;
+        let x, n = 0;
+        while ((x = re.exec(text)) && n < (max || 1) && out.length < 16) {
+            n++;
+            out.push({ what: what, text: text.slice(Math.max(0, x.index - before), x.index + after).replace(/\s+/g, ' ').trim() });
+        }
+        return n;
+    };
+    add('what starts the playlist (startPlaybackWithPlayItem =)', /startPlaybackWithPlayItem\s*=[^=]/g, 10, 800);
+    add('the id\'s number of the app (convertedLoggingId =)', /convertedLoggingId\s*=[^=]/g, 160, 300);
+    // (the function that makes that number, where it is one: its definition)
+    const conv = /convertedLoggingId\s*=\s*(?:\(0\s*,\s*)?(?:[\w$]+\.)*([A-Za-z_$][\w$]{3,})\)?\s*\(/.exec(text);
+    if (conv && !/^(parseInt|Number|Math|String)$/.test(conv[1])) {
+        if (!add('its function ' + conv[1], def(conv[1]), 0, 420)) add('its function ' + conv[1], new RegExp('[^\\w$]' + conv[1].replace(/\$/g, '\\$') + '\\s*=\\s*(?:function|\\(|[\\w$]+\\s*=>)', 'g'), 0, 420);
+    }
+    add('the id\'s type per instance (sourceToItemTypeMap =)', /sourceToItemTypeMap\s*=[^=]/g, 10, 320);
+    // (the class's other connections to the car: whom its "sound property" is set at)
+    add('another proxy of the class', /this\.(?!mediaPlayerProxy)[\w$]*[Pp]roxy\s*=[^=]/g, 0, 240, 3);
+    add('the use case per instance (sourceToUseCaseParameterMap =)', /sourceToUseCaseParameterMap\s*=[^=]/g, 10, 300);
+    add('where the app keeps the file (getVideoPath)', def('getVideoPath'), 60, 520);
+    add('how the app\'s id is found', /Could not determine the appID/g, 560, 80);
+    add('registerAudioFocus(', def('registerAudioFocus'), 0, 520);
     return out;
 }
 
@@ -202,7 +240,7 @@ function preludeEnd(text) {
  * mods: the bundle's module map { id: [function (require, module, exports), { name: id }] }. */
 function inSandbox(mods, opt, ext) {
     var STUB = '__rt_stub__';
-    var log = { calls: [], timers: [], notes: [], failed: {}, externals: {}, subs: [], touched: {} };
+    var log = { calls: [], other: [], timers: [], notes: [], failed: {}, externals: {}, subs: [], touched: {} };
     var label = '';
     var DMP = opt.methods, FIELDS = opt.fields;
     var last = function (name) { var m = /([A-Za-z_$][\w$]*)(?:\(\))?>?$/.exec(name); return m ? m[1] : ''; };
@@ -250,16 +288,26 @@ function inSandbox(mods, opt, ext) {
             var field = FIELDS.filter(function (f) { return text.indexOf(f) >= 0; }).sort(function (x, y) { return y.length - x.length; })[0] || null;
             if (log.subs.length < 60) log.subs.push({ in: label, path: name, field: field, fns: fns });
         }
-        return stub(name + '()', true);
+        // what the class asks of anything else than the player while it sets its "sound property" or plays a file:
+        // of whom (the path says how the class reached it) and with what - logging and its own state machine aside
+        if (/^(setSoundProperty|setImageRequestProperty)\(\)|^constructed: (playFile|setSoundProperty)/.test(label) && log.other.length < 24 &&
+            !/logg|console|dlt|stateService|\.(log|info|warn|error|debug|trace|emit|send|inspect|bind|includes|toString|delay|resolve|reject)$/i.test(name)) {
+            log.other.push({ in: label, path: name.slice(-200), method: m, args: enc(list.length === 1 ? list[0] : list) });
+        }
+        // (the words it was called with stay in its name: a proxy made of an interface's and an instance's name says so)
+        var sig = list.filter(function (x) { return typeof x === 'string' || typeof x === 'number'; }).map(function (x) { return JSON.stringify(x); }).join(',').slice(0, 70);
+        return stub(name + '(' + sig + ')', true);
     }
     /* A stand-in for anything outside the bundle or not set on the instance: every property is another stand-in,
      * a call is recorded (when it is one of the player's) and answers a stand-in that can also be awaited. */
-    function stub(name, thenable) {
+    function stub(name, thenable, own) {
         var f = function () { 'use strict'; };      // (strict: no own arguments/caller the proxy would have to tell the truth about)
         var pr = null;
         return new Proxy(f, {
             get: function (t, k) {
                 if (k === STUB) return name;
+                // (what is known of it is said as it is: the options the class is made with)
+                if (own && typeof k === 'string' && Object.prototype.hasOwnProperty.call(own, k)) return own[k];
                 if (k === 'then' || k === 'catch') {
                     if (!thenable) return undefined;
                     pr = pr || Promise.resolve(stub(name + '>', false));
@@ -349,7 +397,7 @@ function inSandbox(mods, opt, ext) {
     var proto = Cls.prototype;
     var names = Object.getOwnPropertyNames(proto).filter(function (n) { var d = Object.getOwnPropertyDescriptor(proto, n); return d && typeof d.value === 'function'; });
     out.methodNames = names;
-    var want = [/^playlistConverter$/, /^generateItemId$/, /getAudioFocus\s*\(/, /\.heartBeat\s*\(/, /^playFile$/, /^playItem$/, /^createPlaylist$/, /setCurrentItemPositionAndTime\s*\(/, /setAutoplay\s*\(/, /releaseAudioFocus\s*\(/, /^constructor$/];
+    var want = [/^playlistItemConverter$/, /^setPlaylist$/, /^(setSoundProperty|setImageRequestProperty|handleSinkNotification|waitForDecoder)$/, /^(sendResume|sendPause|sendButtonEvent|sendButtonPressAndRelease|startNewIfNoExistingPlayback|resetPlayback|connect|init)$/, /^playlistConverter$/, /^generateItemId$/, /getAudioFocus\s*\(/, /\.heartBeat\s*\(/, /^playFile$/, /^playItem$/, /^createPlaylist$/, /setCurrentItemPositionAndTime\s*\(/, /setAutoplay\s*\(/, /releaseAudioFocus\s*\(/, /^constructor$/];
     var total = 0;
     want.forEach(function (re) {
         names.forEach(function (n) {
@@ -361,6 +409,24 @@ function inSandbox(mods, opt, ext) {
             total += s.length;
         });
     });
+
+    // what the class itself carries (its statics): the type an item's id gets per player instance is one of them
+    out.statics = {};
+    var typeMap = null;
+    try {
+        Object.getOwnPropertyNames(Cls).forEach(function (k) {
+            if (/^(length|name|prototype|caller|arguments)$/.test(k)) return;
+            var v;
+            try { v = Cls[k]; } catch (e) { return; }
+            if (typeof v === 'function' || v === undefined) return;
+            var e = enc(v);
+            if (JSON.stringify(e).length > 1500 || Object.keys(out.statics).length >= 12) return;
+            out.statics[k] = e;
+            var plain = v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length > 0 && Object.keys(v).every(function (x) { return typeof v[x] === 'number'; });
+            if (plain && (/ItemType/i.test(k) || !typeMap)) typeMap = v;
+        });
+    } catch (e) { /* none readable */ }
+    out.instances = typeMap ? Object.keys(typeMap) : [];
 
     // 2. an instance without its constructor: what the class itself does not set is a stand-in
     function bare(mediaType) {
@@ -393,6 +459,26 @@ function inSandbox(mods, opt, ext) {
     convert('the same without metadata', 'Audio', false);
     convert('the same as a video', 'Video', true);
     if (c1.out && !c1.error) { out.item = c1.out; out.itemHow = c1.how; }
+    // the item with the id the class's own generateItemId gives it, for each player instance it knows and each
+    // number an app could have (opt.logIds: [{ key, n }], n null for "not a number")
+    out.ids = [];
+    (out.instances.length ? out.instances : [null]).forEach(function (K) {
+        (opt.logIds || []).forEach(function (L) {
+            if (out.ids.length >= 60) return;
+            var rec = { inst: K, log: L.key, n: null, out: null, error: null };
+            try {
+                var inst = bare('Audio');
+                if (K !== null) inst.instance = K;
+                inst.convertedLoggingId = typeof L.n === 'number' ? L.n : NaN;
+                var id = inst.generateItemId();
+                rec.n = enc(id);
+                var item = fresh({ fileName: opt.sample.file, metadata: [{ key: 'FILE_SIZE', value: opt.sample.size }] });
+                item.id = id;
+                rec.out = enc(inst.playlistConverter([item], 1));
+            } catch (e) { rec.error = String(e && e.message || e).slice(0, 160); }
+            out.ids.push(rec);
+        });
+    });
 
     // 3. the class's own calls against the recording proxy
     function settle(ms) { return new Promise(function (r) { ext.setTimeout(r, ms || 40); }); }
@@ -412,31 +498,66 @@ function inSandbox(mods, opt, ext) {
     has(/\.getAudioFocus\s*\(/).slice(0, 2).forEach(function (n) { then(function () { return run(bare('Audio'), n + '()', n, []); }); });
     has(/\.heartBeat\s*\(/).filter(function (n) { return !/\.getAudioFocus\s*\(/.test(src(proto[n])); }).slice(0, 2).forEach(function (n) { then(function () { return run(bare('Audio'), n + '()', n, []); }); });
     if (typeof proto.playItem === 'function') then(function () { return run(bare('Audio'), 'playItem(1, 0)', 'playItem', [1, 0]); });
-    // 4. the class as its constructor makes it (its own state machine), connected by a simulated car, then playFile
+    // (what BMW's code asks beside the player once an item is set: its "sound property", of whom and with what)
+    ['setSoundProperty', 'setImageRequestProperty'].forEach(function (n) { if (typeof proto[n] === 'function') then(function () { return run(bare('Audio'), n + '()', n, []); }); });
+    // 4. the class as its constructor makes it (its own state machine), with the options an app gives it (its
+    // instance's name, the app's title), then init and connect against a simulated car, then playFile
     then(function () {
         var inst;
         label = 'new ' + out.cls + '(...)';
-        try { inst = new Cls(stub('arg0', false), stub('arg1', false), stub('arg2', false), stub('arg3', false)); } catch (e) { log.notes.push('its constructor threw: ' + String(e && e.message || e).slice(0, 160)); return undefined; }
+        var K = out.instances.filter(function (k) { return /^Entertainment$/i.test(k); })[0] || out.instances[0];
+        // (no "lumOptions": an app that does not ask for that mode passes none)
+        var own = K === undefined ? { clientName: 'RideTube' } : { instance: K, clientName: 'RideTube', lumOptions: undefined };
+        try { inst = new Cls(stub('arg0', false, own), stub('arg1', false), stub('arg2', false), stub('arg3', false)); } catch (e) {
+            log.notes.push('its constructor threw with ' + JSON.stringify(own) + ': ' + String(e && e.message || e).slice(0, 140));
+            K = undefined;
+            try { inst = new Cls(stub('arg0', false), stub('arg1', false), stub('arg2', false), stub('arg3', false)); } catch (e2) { log.notes.push('its constructor threw: ' + String(e2 && e2.message || e2).slice(0, 160)); return undefined; }
+        }
         var st = function () { var s; try { s = inst.state !== undefined ? inst.state : inst.publicState; } catch (e) { s = undefined; } return typeof s === 'string' ? s : s === undefined ? undefined : String(JSON.stringify(enc(s))).slice(0, 60); };
-        out.states = [['constructed', st()]];
+        out.states = [['constructed' + (K === undefined ? '' : ' as ' + K), st()]];
+        // (what it made of the app it runs in: the name it asks the focus under, the number its ids carry)
+        out.fields = {};
+        ['instance', 'appId', 'clientName', 'convertedLoggingId', 'loggingId', 'heartBeatTimeoutMs', 'heartBeatIntervalMs', 'lumEnabled', 'decoderTimeout', 'playerStoppedWaitingMs'].forEach(function (k) {
+            var v;
+            try { v = inst[k]; } catch (e) { return; }
+            if (v !== undefined) out.fields[k] = enc(v);
+        });
         try { if (!inst.mediaPlayerProxy || !inst.mediaPlayerProxy[STUB]) { out.proxyWas = inst.mediaPlayerProxy === undefined ? 'not set by the constructor' : 'set by the constructor'; if (inst.mediaPlayerProxy === undefined) inst.mediaPlayerProxy = stub('this.mediaPlayerProxy', false); } } catch (e) { /* as it is */ }
         var say = function (field, value) {
             log.subs.filter(function (s) { return s.field === field; }).forEach(function (s) { s.fns.forEach(function (fn) { try { fn(value); } catch (e) { /* its own business */ } }); });
         };
-        var conn = names.filter(function (n) { return /^(connect|init|initialize|start|open)$/.test(n); })[0] || has(/\.getAudioFocus\s*\(/)[0];
+        var steps = names.filter(function (n) { return /^(init|initialize)$/.test(n); }).slice(0, 1).concat(names.filter(function (n) { return /^(connect|start|open)$/.test(n); }).slice(0, 1));
+        if (!steps.length && has(/\.getAudioFocus\s*\(/)[0]) steps.push(has(/\.getAudioFocus\s*\(/)[0]);
         var p = Promise.resolve();
-        if (conn) p = p.then(function () { return run(inst, 'constructed: ' + conn + '()', conn, []); });
-        return p.then(function () { return settle(120); }).then(function () {
-            out.states.push(['after ' + (conn || 'nothing') + '()', st()]);
-            say('currentAudioFocus', { token: 'RTTOKEN', clientId: 'x', clientName: 'x', status: 'HAS_FOCUS' });
+        steps.forEach(function (n) {
+            p = p.then(function () { return run(inst, 'constructed: ' + n + '()', n, []); }).then(function () { return settle(120); }).then(function () { out.states.push(['after ' + n + '()', st()]); });
+        });
+        // the car's side: the focus is ours, then the connection - said to what listens, and to the class's own
+        // handlers of those two by name (its subscriptions may not have come about against stand-ins)
+        var tell = function (re, value) {
+            names.filter(function (n) { return re.test(n); }).slice(0, 1).forEach(function (n) { try { inst[n](value); } catch (e) { log.notes.push(n + ' threw: ' + String(e && e.message || e).slice(0, 120)); } });
+        };
+        return p.then(function () {
+            var str = function (v, d) { return typeof v === 'string' && v ? v : d; };
+            var focus = { token: str(inst.cachedToken, 'RTTOKEN'), clientId: str(inst.appId, 'x'), clientName: str(inst.clientName, 'x'), status: 'HAS_FOCUS' };
+            say('currentAudioFocus', focus);
+            tell(/^handle\w*AudioFocus\w*$/, focus);
+            return settle(80);
+        }).then(function () {
             say('connectionState', 'CS_CONNECTED');
+            tell(/^handle\w*ConnectionState\w*$/, 'CS_CONNECTED');
             say('playerState', 'PLAYER_STATE_STOP');
-            return settle(120);
+            return settle(160);
         }).then(function () {
             out.states.push(['the car says connected', st()]);
             return typeof inst.playFile === 'function' ? run(inst, 'constructed: playFile(file, 0, "Audio", size)', 'playFile', [opt.sample.file, 0, 'Audio', opt.sample.size]) : undefined;
         }).then(function () { return settle(160); }).then(function () {
             out.states.push(['after playFile', st()]);
+            return typeof inst.setSoundProperty === 'function' ? run(inst, 'constructed: setSoundProperty()', 'setSoundProperty', []) : undefined;
+        }).then(function () {
+            // (what it asks from here on answers a car that plays: not part of how it starts a file)
+            label = 'constructed: once the car says it plays';
+            say('currentItemPosition', { position: 1, totalNumber: 1 });
             say('playerState', 'PLAYER_STATE_PLAY');
             say('currentItemTime', { elapsed: 1000, total: 60000 });
             return settle(120);
@@ -445,6 +566,7 @@ function inSandbox(mods, opt, ext) {
     function finish() {
         out.notes = log.notes.slice(0, 12);
         out.calls = log.calls;
+        out.other = log.other;
         out.timers = log.timers.slice(0, 24);
         out.subs = log.subs.slice(0, 30).map(function (s) { return { in: s.in, path: s.path, field: s.field }; });
         out.failed = log.failed;
@@ -514,4 +636,4 @@ function worker() {
 if (require.main === module && process.argv[2] === 'worker') worker();
 
 module.exports = {
-    textFocus: textFocus, read: read, findBundle: findBundle, textNear: textNear, decode: decode, hasStub: hasStub, show: show, preludeEnd: preludeEnd, SAMPLE: SAMPLE, DMP_METHODS: DMP_METHODS, DMP_FIELDS: DMP_FIELDS };
+    textFocus: textFocus, textPlay: textPlay, read: read, findBundle: findBundle, textNear: textNear, decode: decode, hasStub: hasStub, show: show, preludeEnd: preludeEnd, SAMPLE: SAMPLE, DMP_METHODS: DMP_METHODS, DMP_FIELDS: DMP_FIELDS };

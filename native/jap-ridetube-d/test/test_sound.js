@@ -29,7 +29,8 @@ async function unit(ways, o) {
     const car = fakeCar(ways);
     car.stateFile = path.join(root, 'carstate.json');
     car.write(gen, o.dmp);
-    fs.writeFileSync(path.join(oap, 'oap_12300', 'source', 'package.json'), JSON.stringify({ name: 'jap_ridetube8' }));
+    fs.writeFileSync(path.join(oap, 'oap_12300', 'source', 'package.json'), JSON.stringify({ name: 'jap_ridetube8', oapAppSettings: JSON.stringify({ loggingId: 'RTB8' }) }));
+    if (o.donor) fs.writeFileSync(path.join(oap, 'oap_12209', 'source', 'package.json'), JSON.stringify(o.donor));
     if (o.sdk !== false) fs.writeFileSync(path.join(oap, 'oap_12209', 'source', 'javascript', 'app.js'), bundle(o.sdk || {}));
     const file = path.join(root, 'cache', 'vid12345678', 'audio.m4a'), head = path.join(root, 'cache', 'vid12345678', 'audio.head.m4a');
     fs.writeFileSync(file, 'x'.repeat(1234));
@@ -37,8 +38,8 @@ async function unit(ways, o) {
     fs.writeFileSync(path.join(root, 'ytaud'), '');
     const seen = { state: [], time: [], error: [], note: [] }, lg = [];
     const opts = Object.assign({ someip: car.sip, srcGen: gen, oapRoot: oap, audioConf: path.join(root, 'audio.json'), stateDir: path.join(root, 'state'), id8: true, noSetuid: true, version: 'T1',
-        playerWaitMs: 30, playerAfterMs: 30, availWaitMs: 300, dynWaitMs: 300, dynHeartbeatMs: 40, dynConnectMs: 300, dynEchoMs: 30, dynAutoMs: 120, dynStartWaitMs: 160, dynLookMs: 250, sdkGapMs: 0,
-        codeHomes: ['oap_12209'], runDir: path.join(root, 'run'), direct: false, alsaCmd: [process.execPath, fakeAlsa], ytaud: path.join(root, 'ytaud'), directStartMs: 1500, scanMs: 300, scanBaseMs: 200, amSettleMs: 5,
+        playerWaitMs: 30, playerAfterMs: 30, availWaitMs: 300, dynWaitMs: 300, dynHeartbeatMs: 40, dynConnectMs: 300, dynListMs: 60, dynAutoMs: 120, dynStartWaitMs: 160, dynLookMs: 250, sdkGapMs: 0,
+        codeHomes: ['oap_12209'], runDir: path.join(root, 'run'), oeDir: path.join(root, 'oe'), procDir: path.join(root, 'proc'), direct: false, alsaCmd: [process.execPath, fakeAlsa], ytaud: path.join(root, 'ytaud'), directStartMs: 1500, scanMs: 300, scanBaseMs: 200, amSettleMs: 5,
         alsaEnv: Object.assign({ FAKE_ALSA_LOG: path.join(root, 'alsa.log'), FAKE_ALSA_WAYS: JSON.stringify(o.alsa || {}), FAKE_ALSA_STATE: car.stateFile }, o.alsaEnv || {}), log: (m) => lg.push(m) }, o.audio || {});
     const mk = () => new Audio(opts, { state: (v) => seen.state.push(v), time: (v) => seen.time.push(v), error: (v) => seen.error.push(v), note: (v) => seen.note.push(v) });
     const a = mk();
@@ -50,25 +51,25 @@ async function unit(ways, o) {
 const item = (u) => u.car.dyn('createPlaylist').filter((c) => c.a.newPlaylist.length).pop().a.newPlaylist[0];
 
 async function main() {
-    await t('the car as BMW\'s own code asks it: the item, the heartbeat timer and the start read from the app on the car - it plays at the first try, and that is kept', async () => {
-        const u = await unit({ start: 'pos', hbOk: (hb) => hb === 5 });
+    await t('the car as BMW\'s own code asks it: the item and the start read from the app on the car, the focus with timer 0 - it plays at the first try, and that is kept', async () => {
+        const u = await unit({ start: 'pos', hbOk: (hb) => hb === 0 });
         await u.a.play(u.file);
         const d = u.car.dyn();
         assert.deepStrictEqual(d.map((c) => c.m), ['getAudioFocus', 'createPlaylist', 'setCurrentItemPositionAndTime'], u.story());
-        assert.deepStrictEqual(d[0].a, { clientId: 'jap_ridetube8', clientName: 'RideTube', timeOutHeartBeatTimer: 5 });
+        assert.deepStrictEqual(d[0].a, { clientId: 'jap_ridetube8', clientName: 'RideTube', timeOutHeartBeatTimer: 0 });
         // the item is BMW's converter's: its named union, its 4-byte buffer id, our file and its size in the sample's place
         const it = item(u);
         assert.deepStrictEqual(it.metadata, [{ key: 'FILE_NAME', value: { stringValue: u.file } }, { key: 'FILE_SIZE', value: { numeric: 1234 } }]);
         assert.ok(Buffer.isBuffer(it.id) && it.id.length === 4 && it.pos === 1);
         assert.strictEqual(u.a.connId, 'snd');
-        assert.deepStrictEqual(u.kept().key + '|' + u.kept().form + '|' + u.kept().loc + '|' + u.kept().start + '|' + u.kept().hb, 'dyn:DynamicMediaPlayerMedia|sdk|path|pos|5');
+        assert.deepStrictEqual(u.kept().key + '|' + u.kept().form + '|' + u.kept().loc + '|' + u.kept().start + '|' + u.kept().hb, 'dyn:DynamicMediaPlayerMedia|sdk:ours.1|path|sdk|0');
         // its state and time are the daemon's from here
         await waitUntil(() => u.seen.time.length >= 2 && u.seen.state.length >= 1);
         assert.strictEqual(u.seen.state[0], 'PLAYER_STATE_PLAY');
         assert.ok(u.seen.time[0].total === 180000 && u.seen.time[1].elapsed >= u.seen.time[0].elapsed);
         assert.ok(u.car.calls.filter((c) => c.m === 'heartBeat').length >= 1, 'the focus is kept alive');
         assert.deepStrictEqual(u.car.calls.filter((c) => c.on === 'cc'), [], 'the audio manager is not asked: the player connects itself');
-        assert.ok(/reading BMW's own player code/.test(u.story()) && /PLAYS: DynamicMediaPlayerMedia \| as BMW's own code writes it \| where the file is \| started pos/.test(u.story()), u.story());
+        assert.ok(/reading BMW's own player code/.test(u.story()) && /PLAYS: DynamicMediaPlayerMedia \| BMW's item, id A1B8xxxx \| where the file is \| started sdk/.test(u.story()), u.story());
         // a moment into the play the car's own words go into the story (a play nobody hears shows there)
         await waitUntil(() => /s into it: connectionState CS_CONNECTED \| playerState PLAYER_STATE_PLAY \| currentItemTime \{ elapsed: \d+, total: 180000 \} \(\d+ said\) \| focus ours, HAS_FOCUS/.test(u.story()), 3000);
         assert.ok(u.seen.note.some((x) => /Reading how the car's own apps play/.test(x)) && u.seen.note.some((x) => /Finding how this car plays sound: way 1/.test(x)));
@@ -111,7 +112,7 @@ async function main() {
         assert.ok(Array.isArray(item(u).id));
         assert.ok(/createPlaylist \[named values, id a Buffer \| where the file is\] .* FAILED: ByteBuffer: wrong type/.test(u.story()), u.story());
         assert.ok(/not read: no installed app carries the SDK's player/.test(u.story()));
-        assert.deepStrictEqual(u.car.dyn()[0].a.timeOutHeartBeatTimer, 10000);
+        assert.deepStrictEqual(u.car.dyn()[0].a.timeOutHeartBeatTimer, 0);
         await u.a.release();
     });
 
@@ -134,7 +135,7 @@ async function main() {
     await t('the media engine cannot read our cache folder and says so: the same form with the file in our app\'s data folder plays', async () => {
         const u = await unit({ readable: (nm) => /\/oap\/oap_12300\/data\//.test(nm) && !/^file:/.test(nm) });
         await u.a.play(u.file);
-        assert.strictEqual(u.kept().form + '|' + u.kept().loc, 'sdk|pub', u.story());
+        assert.strictEqual(u.kept().form + '|' + u.kept().loc, 'sdk:ours.1|pub', u.story());
         const nm = item(u).metadata[0].value.stringValue;
         assert.ok(/oap_12300\/data\/rt-audio-[0-9a-f]{8}\.m4a$/.test(nm) && fs.readFileSync(nm, 'utf8').length === 1234, nm);
         assert.ok(/ITEM_UNPLAYABLE/.test(u.story()));
@@ -179,10 +180,10 @@ async function main() {
     }
 
     await t('the heartbeat timer in seconds with a limit, a client id the player does not know: the next values are taken', async () => {
-        const u = await unit({ hbOk: (hb) => hb <= 60, clientOk: (id) => id === 'RideTube' }, { sdk: false });
+        const u = await unit({ hbOk: (hb) => hb > 0 && hb <= 60, clientOk: (id) => id === 'RideTube' }, { sdk: false });
         await u.a.play(u.file);
-        assert.deepStrictEqual(u.car.dyn('getAudioFocus').map((c) => c.a.clientId + ' ' + c.a.timeOutHeartBeatTimer), ['jap_ridetube8 10000', 'RideTube 10000', 'RideTube 5000', 'RideTube 3000', 'RideTube 2000', 'RideTube 1000', 'RideTube 500', 'RideTube 30']);
-        assert.ok(/getAudioFocus\(RideTube, RideTube, 30\) -> .*OK.* \| refused before: GENERAL_ERROR x1, BAD_ARGUMENT x6/.test(u.story()), u.story());
+        assert.deepStrictEqual(u.car.dyn('getAudioFocus').map((c) => c.a.clientId + ' ' + c.a.timeOutHeartBeatTimer), ['jap_ridetube8 0', 'RideTube 0', 'RideTube 10000', 'RideTube 5000', 'RideTube 3000', 'RideTube 2000', 'RideTube 1000', 'RideTube 500', 'RideTube 30']);
+        assert.ok(/getAudioFocus\(RideTube, RideTube, 30\) -> .*OK.* \| refused before: GENERAL_ERROR x1, BAD_ARGUMENT x7/.test(u.story()), u.story());
         assert.deepStrictEqual([u.kept().clientId, u.kept().hb], ['RideTube', 30]);
         await u.a.release();
         // a player that knows only the names the app manager has for the apps: our home's, its number, and last the
@@ -212,7 +213,7 @@ async function main() {
         await assert.rejects(v.a.play(v.file), /no way to play sound/);
         const fl = v.story().split('\n').filter((l) => /getAudioFocus/.test(l));
         assert.strictEqual(fl.length, 3, v.story());
-        assert.ok(/getAudioFocus refused all \d+ ways it was asked: BAD_ARGUMENT x\d+ \| names jap_ridetube8, RideTube, oap_12300, 12300 \| shown as RideTube, the name itself, nothing \| timers 10000, 5000, 3000, 2000, 1000, 500, 30, 10, 5, 3, 2, 1, 0, 60, 15000, 30000, 60000/.test(fl[0]), fl[0]);
+        assert.ok(/getAudioFocus refused all \d+ ways it was asked: BAD_ARGUMENT x\d+ \| names jap_ridetube8, RideTube, oap_12300, 12300 \| shown as RideTube, the name itself, nothing \| timers 0, 10000, 5000, 3000, 2000, 1000, 500, 30, 10, 5, 3, 2, 1, 60, 15000, 30000, 60000/.test(fl[0]), fl[0]);
     });
 
     await t('an instance that does not answer or gives no focus: the next one (TempMedia)', async () => {
@@ -259,7 +260,7 @@ async function main() {
     await t('a player that needs the connection first and gets it late; a token lost once: asked again, then it plays', async () => {
         let u = await unit({ needConn: true, connectMs: -1, connectOnList: true }, { audio: { dynConnectMs: 400 } });
         await u.a.play(u.file);
-        assert.ok(/CONNECTION_STATE_NOT_VALID/.test(u.story()) && /connectionState CS_CONNECTED/.test(u.story()), u.story());
+        assert.ok(/CONNECTION_STATE_NOT_VALID/.test(u.story()) && /connectionState CS_DISCONNECTED -> CS_CONNECTED \|/.test(u.story()), u.story());
         await u.a.release();
         u = await unit({ needConn: true, connectMs: -1 }, { audio: { dynConnectMs: 100 } });
         await assert.rejects(u.a.play(u.file), /no way to play sound on this car has worked yet \(3 tried\)/);
@@ -489,34 +490,122 @@ async function main() {
         await u.a.release();
     });
 
-    await t('the Diagnostics lines: what is kept, the story, BMW\'s code as read', async () => {
-        const u = await unit({ start: 'pos' });
+    await t('the Diagnostics lines: what is kept, the story, how BMW\'s code plays a file, where the car\'s player may read one', async () => {
+        const u = await unit({ start: 'pos' }, { sdk: { id8: true }, donor: { name: 'message_handling', oapAppSettings: JSON.stringify({ loggingId: 'OA15' }) } });
+        // (the car's media programs as /proc shows them, its store for online media with another app's folder in it)
+        fs.mkdirSync(path.join(u.root, 'proc', '1598', 'fd'), { recursive: true });
+        fs.writeFileSync(path.join(u.root, 'proc', '1598', 'comm'), 'mediaengine\n');
+        fs.writeFileSync(path.join(u.root, 'proc', '1598', 'status'), 'Name:\tmediaengine\nUid:\t1012\t1012\t1012\t1012\nGid:\t1012\t1012\t1012\t1012\nGroups:\t29 1012 1100\n');
+        fs.writeFileSync(path.join(u.root, 'proc', 'mounts'), 'tmpfs /mnt/share/ent tmpfs rw,nosuid 0 0\n/dev/sda1 / ext4 ro 0 0\n');
+        fs.mkdirSync(path.join(u.root, 'oe', 'OA15'), { recursive: true });
+        fs.writeFileSync(path.join(u.root, 'oe', 'OA15', 'clip.mp4'), 'v');
         await u.a.play(u.file);
-        const s = u.a.snd(), lines = s.lines(), code = s.codeLines().join('\n');
-        assert.ok(/^Kept from the last play that worked: dyn:DynamicMediaPlayerMedia \| item sdk \| file path \| start pos \| focus jap_ridetube8, timer 5 \| 1 plays$/.test(lines[0]), lines[0]);
+        const s = u.a.snd(), lines = s.lines();
+        assert.ok(/^Kept from the last play that worked: dyn:DynamicMediaPlayerMedia \| item sdk:ours \| file path \| start sdk \| focus jap_ridetube8, timer 0 \| 1 plays$/.test(lines[0]), lines[0]);
         assert.ok(/^Last play: audio\.m4a \| plays through the car's dynamic media player \(Media\) \| \d+ lines$/.test(lines[1]), lines[1]);
-        assert.ok(lines.some((l) => /^\+\d+\.\ds createPlaylist \[as BMW's own code writes it \| where the file is\] \[ \{ pos: 1, id: <Buffer 00 00 00 0\d>, metadata: .* -> OK, list 1\/1, it names our file \| started position\(1, 0\): PLAYS \| the player said: .*currentItemMetadata \[ \{ key: 'FILE_NAME', value: \{ stringValue: '<our file>' \} \} \]$/.test(l)), lines.join('\n'));
-        assert.ok(/^BMW's own player code: read from .*oap_12209\/source\/javascript\/app\.js \(class MediaPlayerImpl, module 3 of 7\)\nThe item as it writes it: \[\{pos: 1, id: <Buffer 0000000\d>, metadata: \[\{key: "FILE_NAME", value: \{stringValue: "\/rt-sample\/audio-RTSAMPLE\.m4a"\}\}/.test(code), code);
-        assert.ok(/Its calls of the player: .*\[connect\(\)\] getAudioFocus\(\{clientId: <this\.app\.getAppId\(\)>, clientName: <this\.app\.name>, timeOutHeartBeatTimer: 5\}\)/.test(code), code);
-        assert.ok(/Its timers: .*interval 2000 ms/.test(code) && /\[playlistConverter\] playlistConverter\(list, start\)/.test(code) && /Its states against a simulated car: constructed = Disconnected/.test(code), code);
-        // the top of the page: how BMW's code asks for the focus - its call as recorded, the methods that make it, the
-        // bundle's own words wherever they are, and how the two apps name themselves
-        fs.writeFileSync(path.join(u.oap, 'oap_12209', 'source', 'package.json'), JSON.stringify({ name: 'bmw_videoapp', version: '1.2.3', oap: { appId: 'video.app' }, scripts: { a: 'b' } }));
-        const fl = s.focusLines(), focus = fl.join('\n');
-        assert.ok(/^BMW's own player code: read from .*oap_12209\/source\/javascript\/app\.js \(class MediaPlayerImpl\)$/.test(fl[0]), fl[0]);
-        assert.ok(/^It asks: getAudioFocus\(\{clientId: <this\.app\.getAppId\(\)>, clientName: <this\.app\.name>, timeOutHeartBeatTimer: 5\}\) \[in connect\(\)\]/.test(fl[1]), fl[1]);
-        assert.ok(/^Its heartbeat: interval 2000 ms/.test(fl[2]), fl[2]);
-        assert.ok(/\n\[connect\] connect\(\)[^\n]*getAudioFocus\(\{ clientId: this\.app\.getAppId\(\)/.test(focus) && focus.split('[near AudioFocus').length === 2, focus);
-        assert.ok(/\n\[near AudioFocus call \(clientName:\)\] [^\n]*clientId: this\.app\.getAppId\(\), clientName: this\.app\.name, timeOutHeartBeatTimer: HEARTBEAT_TIMEOUT/.test(focus), focus);
-        assert.ok(/\nThat app's package: oap_12209 \{"name":"bmw_videoapp","version":"1\.2\.3","oap":"\{\\"appId\\":\\"video\.app\\"\}"\}/.test(focus), focus);
-        // ... and none of that twice further down
-        assert.ok(!/\n\[connect\] /.test('\n' + s.codeLines().join('\n')) && /\[playlistConverter\]/.test(s.codeLines().join('\n')));
+        // the story: one line of how the player is before anything is asked, the item whole where it is first taken
+        assert.ok(lines.some((l) => /^\+\d+\.\ds DynamicMediaPlayerMedia answers \| connectionState CS_DISCONNECTED \| playerState PLAYER_STATE_STOP \| autoPlayStatus false \| currentAudioFocus .* \| currentItemPosition \{ position: 0, totalNumber: 0 \}$/.test(l)), lines.join('\n'));
+        assert.ok(!lines.some((l) => /the player: /.test(l)), lines.join('\n'));
+        assert.ok(lines.some((l) => /^\+\d+\.\ds createPlaylist \[BMW's item, id A1B8xxxx \| where the file is\] \[ \{ id: <Buffer a1 b8 00 01>, metadata: \[ \{ key: 'FILE_SIZE', value: \{ numeric: 1234 \} \}, \{ key: 'ITEM_ID', value: \{ id: <Buffer a1 b8 00 01> \} \}, \{ key: 'FILE_NAME'.* -> OK, list 1\/1, it names our file \| started as BMW's code does \(setCurrentItemPositionAndTime, sendButtonEventDirect PLAY PRESS\): PLAYS/.test(l)), lines.join('\n'));
+        // how BMW's code plays a file: what the class carries, what it makes of the app, its ids, its calls, the text
+        const pl = s.playLines(), play = pl.join('\n');
+        const has = (re, text) => assert.ok(re.test(text), String(re) + '\n' + text);
+        has(/^BMW's own player code: read from .*oap_12209\/source\/javascript\/app\.js \(class MediaPlayerImpl\)$/, pl[0]);
+        has(/^What the class carries: itemIdCounter = \d+ \| sourceToItemTypeMap = \{Entertainment: 1, EntertainmentTemp: 2, EntertainmentTempLum: 3, Interrupt: 5\}$/, pl[1]);
+        has(/^Made as an app makes it \(constructed as Entertainment\): instance = "Entertainment" \| appId = "unknown" \| clientName = "RideTube" \| convertedLoggingId = 2581 /, pl[2]);
+        has(/^The ids its generateItemId gives \(the number of the app: ours 0xAB8, theirs 0xA15, ours-low 0xB8, theirs-low 0x15, none none\): Entertainment: ours A1B8[0-9A-F]{4}, theirs A115[0-9A-F]{4}, ours-low 01B8[0-9A-F]{4}, theirs-low 0115[0-9A-F]{4}, none 0100[0-9A-F]{4} \| EntertainmentTemp: ours A2B8/, pl[3]);
+        has(/^Its calls, made that way: \[connect\(\)\] getAudioFocus\(\{clientId: "unknown", clientName: "RideTube", timeOutHeartBeatTimer: 0\}\) \|\| \[connect\(\)\] setAutoplay\(\{token: "RTTOKEN", autoplay: false\}\) \|\| \[playFile\(file, 0, "Audio", size\)\] createPlaylist\(.*\) \|\| \[playFile\(file, 0, "Audio", size\)\] setCurrentItemPositionAndTime\(\{token: "RTTOKEN", newPosition: 1, newTimeElapsed: 0\}\) \|\| .*sendButtonEventDirect/, pl[4]);
+        has(/\nIts states against a simulated car: constructed as Entertainment = Disconnected \| after init\(\) = Disconnected \| after connect\(\) = Connecting \| the car says connected = Connected \| after playFile = Starting \| the car says playing = Playing\n/, play);
+        has(/\nThe keys an item's metadata may have \(the player's description\): FILE_NAME, FILE_SIZE, ITEM_ID, TITLE\n/, play);
+        has(/\nLogging ids: that app's OA15 \| ours RTB8\n/, play);
+        // what BMW's code asks beside the player (its "sound property"), of whom, and the text of that method
+        has(/\nWhat it asks beside the player \(its "sound property"\): this\.audioManagerProxy\.setMainSinkSoundProperty\(\{sinkID: 1024, soundProperty: \{type: "SP_AVSYNC_TARGET", value: 0\}\}\) \|\| ext:someip\.buildProxy\("CommandControl","1"\)\.setMainSinkSoundProperty\(/, play);
+        has(/\n\[setSoundProperty\] setSoundProperty\(\) \{ logger\.info/, play);
+        has(/\n\[what starts the playlist \(startPlaybackWithPlayItem =\)\] this\.startPlaybackWithPlayItem = \(position, time\) => this\.mediaPlayerProxy\.setCurrentItemPositionAndTime/, play);
+        has(/\n\[the id's number of the app \(convertedLoggingId =\)\] [^\n]*this\.convertedLoggingId = logging\.convertLoggingId\(logging\.loggingId\(\)\)/, play);
+        has(/\n\[its function convertLoggingId\] [^\n]*parseInt\(String\(text\)\.slice\(1\), 16\)/, play);
+        has(/\n\[where the app keeps the file \(getVideoPath\)\] [^\n]*getVideoPath\(uuid\) \{ return this\.root \+ "\/media\/"/, play);
+        has(/\n\[how the app's id is found\] [^\n]*Could not determine the appID/, play);
+        has(/\n\[setPlaylist\] setPlaylist\(list, mediaType\)[^\n]*\n\[playlistItemConverter\] playlistItemConverter\(item, pos\)[^\n]*\n\[setSoundProperty\] setSoundProperty\(\)[^\n]*\n\[connect\] connect\(\)/, play);
+        // (what BMW's code asks after its playlist is asked of the car the same way: the start that played)
+        assert.strictEqual(u.kept().start, 'sdk');
+        assert.deepStrictEqual(u.car.dyn().map((c) => c.m + (c.a.button ? ' ' + c.a.button + ' ' + c.a.action : '')), ['getAudioFocus', 'createPlaylist', 'setCurrentItemPositionAndTime', 'sendButtonEventDirect PLAY PRESS']);
+        // where the car's player may read a file
+        const wl = s.whereLines();
+        assert.strictEqual(wl[0], 'The car\'s media programs run as: mediaengine (1598): user 1012, group 1012, more groups 29 1012 1100');
+        assert.ok(new RegExp('^The car\'s store for online media ' + path.join(u.root, 'oe').replace(/[.\/]/g, '\\$&') + ' \\(\\d+ \\d+:\\d+\\): OA15/ \\(\\d+ \\d+:\\d+\\) \\[1: clip\\.mp4\\]$').test(wl[1]), wl[1]);
+        assert.strictEqual(wl[2], 'Mounted there: tmpfs /mnt/share/ent tmpfs rw,nosuid');
+        assert.ok(/^The folder of the app whose code was read, .*oap_12209: source\/ \(\d+ \d+:\d+\) \[2: javascript, package\.json\] \|\| its data: not readable \(ENOENT\)$/.test(wl[3]), wl[3]);
+        assert.ok(/^Our app's folder .*oap_12300: data\/ \(\d+ \d+:\d+\) \[empty\] \| source\/ /.test(wl[4]), wl[4]);
+        assert.ok(new RegExp('^Our file ' + u.file.replace(/[.\/]/g, '\\$&') + ' \\(644 \\d+:\\d+\\) \\| ').test(wl[5]), wl[5]);
+        // the rest of what was read is for the whole page: every method's text
+        assert.ok(/\[playlistConverter\] playlistConverter\(list, start\)/.test(s.codeLines().join('\n')) && /^Its calls of the player: /.test(s.codeLines()[0]));
         // the car's sound wiring as the probe read it
         s.probe = { plumbing: { snd: ['mediaengine (4103): pcmC0D3p'], maps: ['mediaengine (4103): smartx_Entertainment_p'], used: ['card0/pcm3p/sub0 RUNNING by mediaengine (4103), 48000 Hz 2 ch'], words: ['hw:0,3 <- OapGenericMedia'],
             pcms: ['entertainment_main=hw card aplmgu device 3'], cards: ['0 [aplmgu]'], pcm: ['00-03: Media'], libs: [], shm: ['avb_Amp_p', 'smartx_X_p'], files: ['a.xml (10)'] } };
         assert.deepStrictEqual(s.plumbingLines().slice(0, 4), ['Programs and the sound devices they have open (/dev/snd): mediaengine (4103): pcmC0D3p', 'Programs and the router\'s buffers they have (/dev/shm): mediaengine (4103): smartx_Entertainment_p',
             'The kernel\'s sound streams in use: card0/pcm3p/sub0 RUNNING by mediaengine (4103), 48000 Hz 2 ch', 'The media engine\'s configuration about its sound output: hw:0,3 <- OapGenericMedia']);
         await u.a.release();
+    });
+
+    await t('the car as it answered 0.5.1 - the focus only with timer 0, OK to every playlist and its list empty: the list takes BMW\'s item once its id says an app and this instance and the file is in the car\'s store for online media, and it plays', async () => {
+        const got = [];
+        const u = await unit({ start: 'pos', hbOk: (hb) => hb === 0, idOk: (id, inst) => { got.push(id.toString('hex').slice(0, 4)); return id.length === 4 && id[0] === (inst === 'DynamicMediaPlayerMedia' ? 0xa1 : 0xa2); },
+            storeOk: (nm) => nm.indexOf('/oe/jap_ridetube8/') > 0 }, { sdk: { id8: true }, donor: { name: 'message_handling', oapAppSettings: JSON.stringify({ loggingId: 'OA15' }) } });
+        fs.mkdirSync(path.join(u.root, 'oe'));
+        const t0 = Date.now();
+        await u.a.play(u.file);
+        assert.ok(Date.now() - t0 < 6000, 'found in ' + (Date.now() - t0) + ' ms');
+        assert.deepStrictEqual(u.kept().form + '|' + u.kept().loc + '|' + u.kept().start + '|' + u.kept().hb, 'sdk:ours|oe|sdk|0', u.story());
+        assert.deepStrictEqual(got, ['a1b8', 'a1b8'], 'the likeliest id first: at the file\'s place, then in the store');
+        const it = item(u), nm = it.metadata[2].value.stringValue;
+        assert.deepStrictEqual(it.metadata.map((m) => m.key), ['FILE_SIZE', 'ITEM_ID', 'FILE_NAME']);
+        assert.ok(it.id.equals(it.metadata[1].value.id) && it.id.readUInt16BE(2) === 2, 'the id stands in the item twice, counted on at each use');
+        assert.ok(new RegExp('/oe/jap_ridetube8/rt-audio-[0-9a-f]{8}\\.m4a$').test(nm) && fs.readFileSync(nm, 'utf8').length === 1234, nm);
+        assert.ok(/BMW's item with each id an app could give it \(A1B8xxxx\), our file where the file is: createPlaylist OK 1 times, the list stays empty$/m.test(u.story()), u.story());
+        assert.ok(/PLAYS: DynamicMediaPlayerMedia \| BMW's item, id A1B8xxxx \| a copy in the car's store for online media \| started sdk/.test(u.story()), u.story());
+        // the head's switch to the whole file: the same id's next count, the file in the store too; a release leaves nothing there
+        await u.a.replay(u.head);
+        assert.ok(item(u).id.readUInt16BE(2) === 3 && /\/oe\/jap_ridetube8\//.test(item(u).metadata[2].value.stringValue));
+        await u.a.release();
+        assert.deepStrictEqual(fs.readdirSync(path.join(u.root, 'oe')), [], 'our folder in the store is gone with the play');
+        // the next play: that way at once
+        u.car.calls.length = 0;
+        await u.a.play(u.file);
+        assert.deepStrictEqual(u.car.dyn().map((c) => c.m), ['getAudioFocus', 'createPlaylist', 'setCurrentItemPositionAndTime', 'sendButtonEventDirect']);
+        await u.a.release();
+        // an instance with another type in its ids: the first one's list stays empty with every id, the second plays
+        const v = await unit({ start: 'pos', idOk: (id, inst) => inst === 'DynamicMediaPlayerTempMedia' && id[0] === 0xa2 }, { sdk: { id8: true } });
+        await v.a.play(v.file);
+        assert.strictEqual(v.kept().key + '|' + v.kept().form, 'dyn:DynamicMediaPlayerTempMedia|sdk:ours', v.story());
+        assert.ok(/BMW's item with each id an app could give it \(A1B8xxxx, 01B8xxxx, 0100xxxx\), our file where the file is \/ a copy in our app's data folder: createPlaylist OK 6 times, the list stays empty/.test(v.story()), v.story());
+        assert.ok(/our file could not be put: a copy in the car's store for online media \(the car has no .*\/oe\)/.test(v.story()), v.story());
+        await v.a.release();
+    });
+
+    await t('a list that stays empty whatever it is given: every id at every place in a moment each, a short try of BMW\'s own start, and whether the car\'s media engine has our file open is said', async () => {
+        const u = await unit({ start: 'pos', idOk: () => false }, { sdk: { id8: true } });
+        fs.mkdirSync(path.join(u.root, 'oe'));
+        fs.mkdirSync(path.join(u.root, 'proc', '1598', 'fd'), { recursive: true });
+        fs.writeFileSync(path.join(u.root, 'proc', '1598', 'comm'), 'mediaengine\n');
+        const t0 = Date.now();
+        await assert.rejects(u.a.play(u.file), /no way to play sound on this car has worked yet \(3 tried\)/);
+        assert.ok(Date.now() - t0 < 25000, 'took ' + (Date.now() - t0) + ' ms');
+        const st = u.story(), sums = st.split('\n').filter((l) => /each id an app could give it/.test(l));
+        assert.strictEqual(sums.length, 3, st);
+        assert.ok(/\(A1B8xxxx, 01B8xxxx, 0100xxxx\), our file where the file is \/ a copy in the car's store for online media \/ a copy in our app's data folder: createPlaylist OK 9 times, the list stays empty/.test(sums[0]), sums[0]);
+        assert.ok(/\(A2B8xxxx, 02B8xxxx, 0200xxxx\)/.test(sums[1]) && /\(A3B8xxxx, 03B8xxxx, 0300xxxx\)/.test(sums[2]), sums.join('\n'));
+        // then the likeliest id at every place with BMW's own start, its guess and PLAY - and never the all-zero id again
+        assert.ok(/createPlaylist \[BMW's item, id A1B8xxxx \| where the file is\] .* -> OK, list 0\/0 \(empty\) \| started as BMW's code does \(setCurrentItemPositionAndTime, sendButtonEventDirect PLAY PRESS\) -> \{ dynMediaPlayerError: 'GENERAL_ERROR' \}: no, position\(1, 0\) -> \{ dynMediaPlayerError: 'GENERAL_ERROR' \}: no, PLAY: no \| the player said: nothing \| the car's media engine does not have our file open/.test(st), st);
+        assert.ok(/createPlaylist \[BMW's item, id A1B8xxxx \| http:\/\/127\.0\.0\.1 from this service\] /.test(st) && !/as BMW's own code writes it/.test(st), st);
+        assert.ok(u.car.dyn('createPlaylist').every((c) => !c.a.newPlaylist.length || c.a.newPlaylist[0].id[0] !== 0), 'no id starts with a zero byte');
+        assert.ok(!/by itself/.test(st), 'an empty list is not waited on');
+        assert.ok(/NOT through the car's dynamic media player \(Media\): answers OK to our playlist and leaves its list empty/.test(st), st);
+        assert.strictEqual(st.split('the first: [').length, 2, 'the item is shown whole once');
+        // ... and when it does have it open
+        fs.symlinkSync(u.file, path.join(u.root, 'proc', '1598', 'fd', '7'));
+        assert.strictEqual(u.a.snd().readers(u.file), 'mediaengine');
+        assert.strictEqual(u.a.snd().readers('/nowhere/else.m4a'), null);
     });
 
     await t('through the daemon: a play prepares with notes, plays with the way found in its state; pause and resume; "No sound?" goes on with the next way from where it was; the page; start over', async () => {
@@ -570,7 +659,8 @@ async function main() {
         c.send({ cmd: 'diag' });
         const diag = await got((e) => e.ev === 'diag');
         assert.ok(/^RideTube service /.test(diag.lines[0]) && diag.lines[1] === '# Sound on this car (found by trying)' && /^Kept from the last play that worked: dyn:DynamicMediaPlayerMedia \| item sdk/.test(diag.lines[2]), diag.lines.slice(0, 4).join('\n'));
-        assert.ok(diag.lines.indexOf('# BMW\'s own player code, read on this car') > diag.lines.indexOf('# The dynamic media player'), diag.lines.filter((l) => l[0] === '#').join(' | '));
+        assert.ok(diag.lines.indexOf('# How BMW\'s own code plays a file') > diag.lines.indexOf('# Where the car\'s player may read a file') && diag.lines.indexOf('# Where the car\'s player may read a file') > 2 &&
+            diag.lines.indexOf('# Sound') > diag.lines.indexOf('# How BMW\'s own code plays a file') && diag.lines.indexOf('# The car\'s sound devices') < 0, diag.lines.filter((l) => l[0] === '#').join(' | '));
         assert.ok(!diag.lines.some((l) => l === '# How the installed apps play media'));
         // the driver hears nothing: the same video, from where it was, through the next way
         await sleep(300);
@@ -677,7 +767,7 @@ async function main() {
         c.send({ cmd: 'diag' });
         const diag = await got((e) => e.ev === 'diag');
         const at = diag.lines.indexOf('# Played unheard: the audio manager\'s interfaces for players');
-        assert.ok(at > diag.lines.indexOf('# The car\'s sound devices') && diag.lines.indexOf('# The car\'s sound devices') > diag.lines.indexOf('# Sound on this car (found by trying)'), diag.lines.filter((l) => l[0] === '#').join(' | '));
+        assert.ok(at > diag.lines.indexOf('# How BMW\'s own code plays a file') && diag.lines.indexOf('# How BMW\'s own code plays a file') > diag.lines.indexOf('# Sound on this car (found by trying)'), diag.lines.filter((l) => l[0] === '#').join(' | '));
         assert.strictEqual(diag.lines[at + 1], 'de.bmw.infotainment.am.amsourceinterface.AmPlayerState | service 0xb02c | instances: 1');
         assert.strictEqual(diag.lines[at + 2], '  methods (1): setPlayerState(sourceID:UInt16, state:E1)');
         assert.strictEqual(diag.lines[at + 3], '  E1 = {PLAYING:1, STOPPED:0}');

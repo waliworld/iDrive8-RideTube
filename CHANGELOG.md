@@ -1,5 +1,40 @@
 # Changelog
 
+## Service 0.5.2: iDrive 8, the car gives its audio focus and takes the playlist - its list stays empty
+
+The same G8x answered 0.5.1 (22 photographed pages). Nothing played yet, but the car's own player now talks to us.
+Still not confirmed on a car.
+
+- **The focus is ours.** `getAudioFocus(jap_ridetube8, RideTube, 0)` answered `OK` with a token on all three
+  entertainment instances, after `BAD_ARGUMENT` to every other timer: BMW's own code passes timer 0 for those
+  instances (read on the car). Timer 0 is now asked first, under our own name first. The player then says
+  `HAS_FOCUS` and `CS_CONNECTED`.
+- **`createPlaylist` answers `OK` and the list stays empty** (`currentItemPosition 0/0`, no word of the item, no
+  error), wherever the file was. Two things read on the car explain it and are now tried:
+  - **The item's id.** BMW's `generateItemId` makes four bytes of the app's logging id as a number and a type per
+    player instance (a static map of the class); ours were all zeros, because the reading ran it without either.
+    The reader now runs BMW's own `generateItemId` for each instance the class knows and each number an app could
+    have (ours written like a BMW app's, that of the app whose code was read, their low bytes, none).
+  - **Where the file is.** The media player's configuration names a store for online media (`/mnt/share/ent/oe`).
+    A copy of the file is put in a folder of ours there, owned as the store is, and removed with the play.
+  A play first asks each id at each place (where the file is, the store, our app's folder) for a moment each and
+  looks whether the item is in the list; one that is gets the starts at once. Then the likeliest id at every place
+  with BMW's own start, and a look whether the car's media engine has the file open.
+- **What BMW's code asks after its playlist is asked of the car the same way.** The reader now makes the class as
+  an app does (`{ instance, clientName }`), runs `init` and `connect`, tells its own handlers that the focus and
+  the connection are there, and records what `playFile` then asks; those calls are replayed with our token.
+- **The Diagnostics page is rebuilt around what is still open**, about half as long: the story (one line where a
+  car answered the same to many ways), where the car's media programs may read a file (who they run as, the store
+  and what is in it, the folder of the app whose code was read), and how BMW's code plays a file (what the class
+  carries, its ids, its calls, the text of what starts a playlist, of how the id's number is made, of where an app
+  keeps its file). What the first car has told - its sound wiring, the audio manager's descriptions - is left to
+  the whole page.
+- **What BMW's code asks beside the player is read too.** After it sets an item's position, BMW's class sets a
+  "sound property" through another connection to the car than the player's. The reader records whom that is asked
+  of and with what, and the page shows it with the text of that method and which interface of the car's catalog
+  has such a method (its instances). Nothing of it is asked of the car yet.
+- The audio manager's lists of sources and sinks say why they could not be read.
+
 ## Service 0.5.1: iDrive 8, what the first car answered to 0.5.0
 
 A G8x on iDrive 8 answered 0.5.0 (three photographed pages). None of it played; this is what it said and what

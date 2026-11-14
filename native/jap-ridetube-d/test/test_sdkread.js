@@ -141,6 +141,65 @@ async function main() {
         const none = await sdk.read({ oapRoot: path.join(tmp, 'none') });
         assert.ok(!none.ok && /no installed app/.test(none.error));
     });
+    await t('a class in the manner of iDrive 8\'s apps: its statics, the ids its own generateItemId gives per instance and app number, what it makes of the app and asks once made as an app makes it', async () => {
+        const logIds = [{ key: 'ours', n: 0xAB8 }, { key: 'none', n: null }];
+        const r = await sdk.read({ text: bundle({ id8: true }), logIds: () => logIds });
+        assert.ok(r.ok, r.error);
+        assert.deepStrictEqual(r.statics.sourceToItemTypeMap, { Entertainment: 1, EntertainmentTemp: 2, EntertainmentTempLum: 3, Interrupt: 5 });
+        assert.deepStrictEqual(r.instances, ['Entertainment', 'EntertainmentTemp', 'EntertainmentTempLum', 'Interrupt']);
+        // each instance's type in the id's second half-byte, the app's number around it, a count at the end; "none" as
+        // BMW's code makes it of a logging id that is no number
+        assert.deepStrictEqual(r.ids.map((x) => x.inst + ' ' + x.log + ' ' + x.out[0].id.hex.slice(0, 4)), ['Entertainment ours a1b8', 'Entertainment none 0100', 'EntertainmentTemp ours a2b8', 'EntertainmentTemp none 0200',
+            'EntertainmentTempLum ours a3b8', 'EntertainmentTempLum none 0300', 'Interrupt ours a5b8', 'Interrupt none 0500']);
+        const it = sdk.decode(r.ids[0].out)[0];
+        assert.ok(Buffer.isBuffer(it.id) && it.id.equals(it.metadata[1].value.id) && it.metadata[2].value.stringValue === S.file && it.metadata[0].value.numeric === S.size && !sdk.hasStub(r.ids[0].out));
+        // made with { instance, clientName }: the focus with timer 0 for an entertainment instance, then - connected
+        // by the simulated car - the playlist and what starts it
+        assert.deepStrictEqual(r.fields.instance, 'Entertainment');
+        assert.deepStrictEqual([r.fields.clientName, r.fields.convertedLoggingId, r.fields.lumEnabled], ['RideTube', 0xA15, false]);
+        const made = r.calls.filter((c) => /^constructed/.test(c.in));
+        assert.deepStrictEqual(made.map((c) => c.method), ['getAudioFocus', 'setAutoplay', 'createPlaylist', 'setCurrentItemPositionAndTime', 'sendButtonEventDirect']);
+        assert.deepStrictEqual(made[0].args, { clientId: 'unknown', clientName: 'RideTube', timeOutHeartBeatTimer: 0 });
+        assert.strictEqual(made[2].args.newPlaylist[0].id.hex.slice(0, 4), 'a115');
+        assert.deepStrictEqual(r.states.map((x) => x[1]), ['Disconnected', 'Disconnected', 'Connecting', 'Connected', 'Starting', 'Playing']);
+        // the class's own methods that decide what the car is given, as text
+        assert.ok(/^setPlaylist\(list, mediaType\) \{/.test(r.methods.setPlaylist) && /^playlistItemConverter\(item, pos\) \{ const id = Buffer\.alloc\(4\)/.test(r.methods.playlistItemConverter) && /^init\(\) \{/.test(r.methods.init) && /^connect\(\) \{ this\.stateService/.test(r.methods.connect));
+        // what it asks beside the player once an item is set (its "sound property"): of whom - the path says how the
+        // class reached it, the words a proxy was made with included - and with what; its logger is not part of that
+        assert.ok(r.other.length >= 2 && r.other.every((c) => c.method === 'setMainSinkSoundProperty'), JSON.stringify(r.other));
+        assert.deepStrictEqual(r.other[0], { in: 'setSoundProperty()', path: 'this.audioManagerProxy.setMainSinkSoundProperty', method: 'setMainSinkSoundProperty', args: { sinkID: 1024, soundProperty: { type: 'SP_AVSYNC_TARGET', value: 0 } } });
+        assert.ok(r.other.some((c) => /^constructed: playFile/.test(c.in) && c.path === 'ext:someip.buildProxy("CommandControl","1").setMainSinkSoundProperty'), JSON.stringify(r.other));
+        assert.ok(/^setSoundProperty\(\) \{ logger\.info/.test(r.methods.setSoundProperty), r.methods.setSoundProperty);
+        assert.ok(r.play.some((x) => x.what === 'another proxy of the class' && /^this\.audioManagerProxy = someipBuilders_1\.buildProxy\("CommandControl", "1"\)/.test(x.text)), JSON.stringify(r.play.map((x) => x.what)));
+        // a class whose init fails against stand-ins and subscribes to nothing: its own handlers of the focus and
+        // the connection are told by name, and it still gets as far as its playlist and what starts it
+        const h = await sdk.read({ text: bundle({ id8: true, byHandlers: true }), logIds: logIds });
+        assert.ok(h.notes.some((x) => /init\(\) (threw|rejected): /.test(x)), h.notes.join(' | '));
+        assert.deepStrictEqual(h.states.map((x) => x[1]), ['Disconnected', 'Disconnected', 'Connecting', 'Connected', 'Starting', 'Starting']);
+        assert.deepStrictEqual(h.calls.filter((c) => /^constructed: playFile/.test(c.in)).map((c) => c.method), ['createPlaylist', 'setCurrentItemPositionAndTime', 'sendButtonEventDirect']);
+        // a caller's numbers that cannot be had: none, the rest as before
+        const q = await sdk.read({ text: bundle({ id8: true }), logIds: () => { throw new Error('no'); } });
+        assert.ok(q.ok && q.ids.length === 0 && q.item);
+        // a class without the type map: one id per number, no instance
+        const n = await sdk.read({ text: bundle({ id8: true, noTypeMap: true }), logIds: logIds });
+        assert.deepStrictEqual(n.ids.map((x) => x.inst + ' ' + x.log), ['null ours', 'null none']);
+        assert.deepStrictEqual(n.instances, []);
+    });
+    await t('how a file is played, as text: what starts the playlist, the item and its id, where the app keeps its file - nothing run', async () => {
+        const p = sdk.textPlay(bundle({ id8: true }));
+        const by = (re) => p.filter((x) => re.test(x.what))[0];
+        assert.ok(/^this\.startPlaybackWithPlayItem = \(position, time\) => this\.mediaPlayerProxy\.setCurrentItemPositionAndTime\(/.test(by(/startPlaybackWithPlayItem/).text));
+        assert.ok(/this\.convertedLoggingId = logging\.convertLoggingId\(logging\.loggingId\(\)\)/.test(by(/convertedLoggingId/).text));
+        assert.ok(/convertLoggingId = \(text\) => parseInt\(String\(text\)\.slice\(1\), 16\)/.test(by(/its function convertLoggingId/).text));
+        assert.ok(/sourceToItemTypeMap = \{ Entertainment: 1,/.test(by(/sourceToItemTypeMap/).text) && /getVideoPath\(uuid\) \{ return this\.root/.test(by(/getVideoPath/).text));
+        assert.ok(/path\.basename\(path\.dirname\(process\.argv\[1\]\)\)/.test(by(/app's id is found/).text));
+        assert.ok(p.every((x) => x.text.length <= 1000) && p.length <= 16);
+        // a text with none of it: nothing, never thrown; minified forms are found too
+        assert.deepStrictEqual(sdk.textPlay('var x = 1;'), []);
+        const min = sdk.textPlay('class A{constructor(e){this.convertedLoggingId=(0,l.toNum)(e.id),this.startPlaybackWithPlayItem=(e,t)=>this.p.setCurrentItemPositionAndTime({token:this.k,newPosition:e,newTimeElapsed:t})}setPlaylist(e,t){return 1}playlistItemConverter(e,t,i=!1){return 2}}A.sourceToItemTypeMap={Entertainment:1};function toNum(e){return parseInt(e.slice(1),16)}');
+        assert.deepStrictEqual(min.map((x) => x.what.replace(/ \(.*$/, '')), ['what starts the playlist', 'the id\'s number of the app', 'its function toNum', 'the id\'s type per instance']);
+        assert.ok(/^toNum\(e\)\{return parseInt/.test(min[2].text), min[2].text);
+    });
     await t('a bundle that never ends is cut off', async () => {
         const loop = bundle({}).replace('exports.default = MediaPlayerImpl;', 'exports.default = MediaPlayerImpl; for (;;) {}');
         const t0 = Date.now();

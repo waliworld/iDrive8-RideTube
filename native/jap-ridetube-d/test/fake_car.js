@@ -14,7 +14,7 @@ const DMP = { name: 'dyn', serviceId: 0xb0c0,
     methods: { addToPlaylist: {}, configureButtonEventForwarding: {}, createPlaylist: {}, getAudioFocus: {}, heartBeat: {}, releaseAudioFocus: {}, removeFromPlaylist: {}, sendButtonEventDirect: {}, setAutoplay: {},
         setCurrentItemPositionAndTime: {}, setMuteState: {}, setPlaybackSpeed: {}, setTime: {}, updatePlaylist: {} },
     fields: { autoPlayStatus: {}, connectionState: {}, currentAudioFocus: {}, currentItemId: {}, currentItemMetadata: {}, currentItemPath: {}, currentItemPosition: {}, currentItemTime: {}, forwardButtons: {}, playerState: {}, repeat: {} },
-    events: { buttonEventForward: {}, playbackErrorEvent: {} } };
+    events: { buttonEventForward: {}, playbackErrorEvent: {} }, enums: { E1: { FILE_NAME: 0, FILE_SIZE: 1, ITEM_ID: 2, TITLE: 3 } } };
 const CC = { name: 'CommandControl', serviceId: 0xb020, instances: { 1: 1 }, methods: { connect: {}, disconnect: {} }, fields: { listOfMainConnections: {} } };
 const MP = { name: 'mp', serviceId: 0xb042, instances: { OapGenericMedia: 0x28 }, methods: { playFile: {}, sendButtonEvent: {}, setTime: {} }, fields: { playerState: {}, currentItemTime: {} }, events: { playbackErrorEvent: {} } };
 
@@ -34,6 +34,8 @@ function fakeCar(ways) {
         start: 'auto',              // what makes a playlist play: 'auto' | 'pos' | 'play' | 'autoplay' | 'never'
         unit: 'ms', timeEvents: true, total: true, echo: true,
         loseFocusAfter: 0,          // the token stops being valid after this many createPlaylist calls (0: never)
+        idOk: null,                 // (id, instance) => whether its list takes an item with this id (else: OK, the list stays empty)
+        storeOk: null,              // (name, instance) => ... an item whose file is here
     }, ways || {});
     const calls = car.calls = [];
     const st = car.st = {};            // per instance
@@ -121,7 +123,7 @@ function fakeCar(ways) {
                         return { dynMediaPlayerError: 'CONNECTION_STATE_NOT_VALID' };
                     }
                     if (car.loseFocusAfter && ++s.lists > car.loseFocusAfter) { s.token = null; return { dynMediaPlayerError: 'TOKEN_NOT_VALID' }; }
-                    const it = a.newPlaylist[0], v0 = it.metadata && it.metadata[0] ? it.metadata[0].value : undefined;
+                    const it = a.newPlaylist[0], named = (it.metadata || []).filter((m) => m && m.key === 'FILE_NAME')[0], v0 = named ? named.value : undefined;
                     const idOk = car.idAs === 'buffer' ? Buffer.isBuffer(it.id) : Array.isArray(it.id);
                     let name = null;
                     if (car.union === 'named' && v0 && typeof v0 === 'object' && typeof v0.stringValue === 'string') name = v0.stringValue;
@@ -132,6 +134,8 @@ function fakeCar(ways) {
                         if (car.bad === 'BAD_ARGUMENT') return { dynMediaPlayerError: 'BAD_ARGUMENT' };
                         name = '';
                     }
+                    // (a list that takes only an item whose id and place it likes: OK either way, the list empty)
+                    if ((car.idOk && !car.idOk(it.id, inst)) || (car.storeOk && !car.storeOk(name, inst))) { halt(inst); s.item = null; s.base = 0; return { dynMediaPlayerError: 'OK' }; }
                     halt(inst);
                     s.item = { name: name }; s.base = 0;
                     s.canPlay = !!name && !!car.readable(name);

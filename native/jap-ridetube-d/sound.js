@@ -94,6 +94,46 @@ function scanText(devs, map) {
     return out.join(' | ') || 'none';
 }
 
+/* BMW's item as read (a template with sdkread's sample path and size) with our file's place and size in it. */
+function fill(v, value, size) {
+    const S = sdkread.SAMPLE;
+    if (typeof v === 'string') return v.split(S.file).join(value);
+    if (typeof v === 'number') return v === S.size ? size : v;
+    if (Buffer.isBuffer(v)) {
+        for (const encn of ['utf8', 'utf16le']) { const at = v.indexOf(Buffer.from(S.file, encn)); if (at >= 0) return Buffer.concat([v.slice(0, at), Buffer.from(value, encn), v.slice(at + Buffer.from(S.file, encn).length)]); }
+        return Buffer.from(v);
+    }
+    if (Array.isArray(v)) return v.map((x) => fill(x, value, size));
+    if (v && typeof v === 'object' && !ArrayBuffer.isView(v)) { const o = {}; Object.keys(v).forEach((k) => { o[k] = fill(v[k], value, size); }); return o; }
+    return v;
+}
+/* Every buffer equal to `from` in a value replaced by `to` (an item's id stands in it twice). */
+function swap(v, from, to) {
+    if (Buffer.isBuffer(v)) return v.equals(from) ? Buffer.from(to) : v;
+    if (Array.isArray(v)) return v.map((x) => swap(x, from, to));
+    if (v && typeof v === 'object' && !ArrayBuffer.isView(v)) { const o = {}; Object.keys(v).forEach((k) => { o[k] = swap(v[k], from, to); }); return o; }
+    return v;
+}
+/* An item id as BMW's code was read to make it: four bytes - the app's number's high part, a type per player
+ * instance, the number's low byte, a counter. */
+function itemId(num, type, count) {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE((((num >> 8) & 15) * 0x10000000 + (type & 15) * 0x1000000 + (num & 255) * 0x10000 + (count & 0xffff)) >>> 0, 0);
+    return b;
+}
+/* The number BMW's code makes of an app's logging id ("OA15" -> 0xA15), or null where the id is not of that kind. */
+function logNum(id) {
+    const m = /^[A-Za-z]([0-9A-Fa-f]{3})$/.exec(String(id || ''));
+    return m ? parseInt(m[1], 16) : null;
+}
+function appLoggingId(home) {
+    const pkg = home ? readJson(path.join(home, 'source', 'package.json')) : null;
+    let set = pkg && pkg.oapAppSettings;
+    if (typeof set === 'string') { try { set = JSON.parse(set); } catch (e) { set = null; } }
+    return set && typeof set.loggingId === 'string' ? set.loggingId : null;
+}
+
+const START_CALLS = ['setCurrentItemPositionAndTime', 'sendButtonEventDirect', 'setAutoplay', 'setPlaybackSpeed', 'setMuteState', 'configureButtonEventForwarding'];
 const DYN_INSTS = [/^DynamicMediaPlayerMedia$/, /^DynamicMediaPlayerTempMedia$/, /^DynamicMediaPlayerTempLumMedia$/];
 const FATAL = /^(ITEM_UNPLAYABLE|ITEM_CORRUPTED|ITEM_NO_DATA|DRM|NO_NETWORK)$/;
 const STATE_V = 1;
@@ -138,7 +178,10 @@ Expose.prototype.copyTo = function (dir, file) {
     // (a folder that is there keeps its mode - it is the app manager's; one we make can be read by the car's player)
     if (!fs.existsSync(dir)) { mkdirp(dir); try { fs.chmodSync(dir, 0o755); } catch (e) { /* as it is */ } }
     const to = path.join(dir, 'rt-audio-' + crypto.randomBytes(4).toString('hex') + path.extname(file));
-    try { fs.linkSync(file, to); } catch (e) { fs.copyFileSync(file, to); }
+    try { fs.linkSync(file, to); } catch (e) {
+        // (a copy that does not fit leaves nothing behind)
+        try { fs.copyFileSync(file, to); } catch (e2) { try { fs.unlinkSync(to); } catch (e3) { /* none was made */ } throw e2; }
+    }
     try { fs.chmodSync(to, 0o644); } catch (e) { /* as it is */ }
     this.made.push(to);
     return to;
@@ -149,6 +192,18 @@ Expose.prototype.pub = function (file) {
     const home = this.appHome();
     if (!home) throw new Error('our app\'s folder was not found under ' + this.o.oapRoot);
     return this.copyTo(path.join(home, 'data'), file);
+};
+/* A copy in the car's own store for online media (its media player's configuration names it as a media store): a
+ * folder of ours in it, owned as the store is. */
+Expose.prototype.store = function (file) {
+    const root = this.o.oeDir || '/mnt/share/ent/oe';
+    let st;
+    try { st = fs.statSync(root); } catch (e) { throw new Error('the car has no ' + root); }
+    if (!st.isDirectory()) throw new Error(root + ' is no folder');
+    const dir = path.join(root, 'jap_ridetube8');
+    const to = this.copyTo(dir, file);
+    [dir, to].forEach((f) => { try { fs.chownSync(f, st.uid, st.gid); } catch (e) { /* as it is */ } });
+    return to;
 };
 Expose.prototype.run = function (file) {
     return this.copyTo(this.o.runDir || '/run/jap-ridetube-d/media', file);
@@ -185,12 +240,13 @@ Expose.prototype.http = async function (file) {
 Expose.prototype.clear = function () {
     this.made.forEach((f) => { try { fs.unlinkSync(f); } catch (e) { /* gone */ } });
     this.made = [];
+    try { fs.rmdirSync(path.join(this.o.oeDir || '/mnt/share/ent/oe', 'jap_ridetube8')); } catch (e) { /* not there, or in use */ }
     this.tokens = {};
     if (this.server) { try { this.server.close(); } catch (e) { /* closed */ } this.server = null; }
 };
 /* At the service's start: files an earlier run left in the places above. */
 Expose.prototype.sweep = function () {
-    const dirs = [this.o.runDir || '/run/jap-ridetube-d/media'];
+    const dirs = [this.o.runDir || '/run/jap-ridetube-d/media', path.join(this.o.oeDir || '/mnt/share/ent/oe', 'jap_ridetube8')];
     const home = this.appHome();
     if (home) dirs.push(path.join(home, 'data'));
     dirs.forEach((d) => {
@@ -254,7 +310,10 @@ DynRoute.prototype.open = async function () {
         names.forEach((n) => {
             try { this.px.subscribe({ name: n, onReceive: (v) => { const r = s.receivers[inst]; if (r) { try { r.onEvent(n, v); } catch (e) { s.o.log('dynamic player: handler: ' + (e && e.stack || e)); } } } }); } catch (e) { none.push(n + ' (' + errText(e).slice(0, 50) + ')'); }
         });
-        this.say(this.inst + ' answers; listening to ' + (names.length - none.length) + ' of its fields and events' + (none.length ? ' (not to: ' + none.join(', ') + ')' : ''));
+        // (how it is before anything is asked of it: one line)
+        const now = [];
+        for (const n of ['connectionState', 'playerState', 'autoPlayStatus', 'currentAudioFocus', 'currentItemPosition']) { const v = await this.value(n); if (v !== undefined) now.push(n + ' ' + show(v, 120)); }
+        this.say(this.inst + ' answers' + (none.length ? ' (no listening to: ' + none.join(', ') + ')' : '') + (now.length ? ' | ' + now.join(' | ') : ''));
     } else this.say(this.inst + ' answers');
 };
 DynRoute.prototype.onEvent = function (name, v) {
@@ -263,11 +322,7 @@ DynRoute.prototype.onEvent = function (name, v) {
     e.v = v;
     e.t = Date.now();
     // (the page's story: during an attempt what it said is gathered into one line; before, each kind's first three)
-    if (this.got) { const g = this.got[name] = this.got[name] || { n: 0 }; g.n++; g.v = v; } else if (!this.active && name !== 'currentItemTime') {
-        this.told = this.told || {};
-        this.told[name] = (this.told[name] || 0) + 1;
-        if (this.told[name] <= 3) this.say('  the player: ' + name + ' ' + show(v, 300));
-    }
+    if (this.got) { const g = this.got[name] = this.got[name] || { n: 0 }; g.n++; g.v = v; } else if (!this.active && name === 'playbackErrorEvent') this.say('  the player: ' + name + ' ' + show(v, 300));
     if (name === 'currentItemTime') this.onTime(v);
     if (name === 'playerState') this.stateEvents = true;
     if (!this.active) return;
@@ -367,15 +422,18 @@ DynRoute.prototype.button = async function (b) {
     await one('RELEASE');
     return r;
 };
-/* The focus: a token, kept alive by our beat. What the player wants to be asked with is not known (on the car it
- * answered BAD_ARGUMENT to every name with five timers), so: what BMW's own code passes where that could be read
- * (sdkread), then every name of ours with a wide row of timers (right as milliseconds, as seconds, none), shown under
- * our title, under the name itself and under nothing. Each answer takes milliseconds. The story gets one line. */
+/* The focus: a token, kept alive by our beat. The first car gave it to our app's name with timer 0 and answered
+ * BAD_ARGUMENT to every other timer; where that is refused: what BMW's own code passes where that could be read
+ * (sdkread), then every name of ours with a wide row of timers, shown under our title, under the name itself and
+ * under nothing. Each answer takes milliseconds. The story gets one line. */
 DynRoute.prototype.getFocus = async function (hint) {
     const sdk = this.s.sdkFacts();
-    const ids = uniq([hint && hint.clientId].concat(sdk.clientIds || [], this.s.clientIds()));
-    const hbs = uniq([hint && hint.hb, sdk.hb, this.o.dynHeartbeatTimer || 10000, 5000, 3000, 2000, 1000, 500, 30, 10, 5, 3, 2, 1, 0, 60, 15000, 30000, 60000]);
-    const titles = uniq([hint && hint.clientName, sdk.clientName, 'RideTube']);
+    // (our own names first: the car gave its focus to the first of them; a name BMW's code passes as a plain word after)
+    const ids = uniq([hint && hint.clientId].concat(this.s.clientIds(), sdk.clientIds || []));
+    // (BMW's own code passes timer 0 for the three entertainment instances - the car took nothing else - and its
+    // heartbeat's time for the others)
+    const hbs = uniq([hint && hint.hb, 0, sdk.hb, this.o.dynHeartbeatTimer || 10000, 5000, 3000, 2000, 1000, 500, 30, 10, 5, 3, 2, 1, 60, 15000, 30000, 60000]);
+    const titles = uniq([hint && hint.clientName, 'RideTube', sdk.clientName]);
     const combos = [];
     ids.forEach((id) => titles.forEach((t) => hbs.forEach((hb) => combos.push([id, t, hb]))));
     ids.forEach((id) => [id, ''].forEach((t) => hbs.forEach((hb) => { if (titles.indexOf(t) < 0) combos.push([id, t, hb]); })));
@@ -427,11 +485,12 @@ DynRoute.prototype.waitConnected = async function (ms) {
         conn = await this.value('connectionState');
         if (conn === undefined && this.ev.connectionState) conn = this.ev.connectionState.v;
         focus = await this.value('currentAudioFocus');
-        const now = 'connectionState ' + show(conn) + ' | currentAudioFocus ' + show(focus);
-        if (now !== said) { said = now; this.say('  ' + now); }
+        const now = show(conn);
+        if (now !== said.slice(-now.length)) said += (said ? ' -> ' : '') + now;
         if (conn === 'CS_CONNECTED' || Date.now() > end || this.s.cancelled) break;
         await sleep(300);
     }
+    this.say('  connectionState ' + said + ' | currentAudioFocus ' + show(focus));
     return { conn: conn, focus: focus, ours: !!(focus && focus.token === this.token) };
 };
 /* What the player says of the item it took: its own words for our file name show the form was understood. */
@@ -445,24 +504,33 @@ DynRoute.prototype.echo = function (value) {
 DynRoute.prototype.starts = function (first) {
     const tok = () => this.token;
     const w = this.o.dynStartWaitMs || 2500;      // how long each start is given to show
-    const all = [
+    const sdk = this.s.sdkFacts().startCalls;
+    const mine = (v) => (v === 'RTTOKEN' ? tok() : Array.isArray(v) ? v.map(mine) : v && typeof v === 'object' && !Buffer.isBuffer(v) ? Object.keys(v).reduce((o, k) => { o[k] = mine(v[k]); return o; }, {}) : v);
+    const all = (sdk ? [{ key: 'sdk', name: 'as BMW\'s code does (' + sdk.map((c) => c.method + (c.args.button ? ' ' + c.args.button + ' ' + c.args.action : '')).join(', ') + ')', ms: w, run: async () => {
+        let bad = null, r = null;
+        for (const c of sdk) { r = await this.call(c.method, mine(c.args), 3000); if (!bad && (!r || r.dynMediaPlayerError !== 'OK')) bad = r || {}; }
+        return bad || r;
+    } }] : []).concat([
         { key: 'auto', name: 'by itself', ms: this.o.dynAutoMs || 1800, run: null },
         { key: 'pos', name: 'position(1, 0)', ms: w, run: () => this.call('setCurrentItemPositionAndTime', { token: tok(), newPosition: 1, newTimeElapsed: 0 }, 3000) },
         { key: 'play', name: 'PLAY', ms: w, run: () => this.button('PLAY') },
         { key: 'autoplay', name: 'autoplay + PLAY', ms: w, run: async () => { const r = await this.call('setAutoplay', { token: tok(), autoplay: true }, 3000); await this.button('PLAY'); return r; } },
         { key: 'pos0', name: 'position(0, 0) + PLAY', ms: w, run: async () => { const r = await this.call('setCurrentItemPositionAndTime', { token: tok(), newPosition: 0, newTimeElapsed: 0 }, 3000); await this.button('PLAY'); return r; } },
-    ];
+    ]);
     // what is known to start it (kept from a play, else read from BMW's code) goes first, at once; nothing known:
     // it is first given a moment to start by itself
-    const lead = uniq((first || []).filter(Boolean).concat(['auto'])).map((k) => all.filter((x) => x.key === k)[0]).filter(Boolean);
+    const lead = uniq((first || []).filter(Boolean).concat(sdk ? ['sdk'] : ['auto'])).map((k) => all.filter((x) => x.key === k)[0]).filter(Boolean);
     return lead.concat(all.filter((x) => lead.indexOf(x) < 0));
 };
 /* (the starts' names on the page: "by itself" - nothing is asked after the playlist; "position(1, 0)" -
  * setCurrentItemPositionAndTime(token, 1, 0), which is what BMW's playItem does; "PLAY" - sendButtonEventDirect PLAY,
  * pressed and released; "autoplay + PLAY" - setAutoplay(token, true) first.)
  * One playlist with our file, written one way (form) and said to be in one place (loc), then the starts until it
- * plays: { out: 'playing' | 'rejected' | 'idle' | 'item-error' | 'token' | 'conn' | 'unprepared', ... }. */
-DynRoute.prototype.attempt = async function (form, loc, file, starts, quick) {
+ * plays: { out: 'playing' | 'rejected' | 'idle' | 'item-error' | 'token' | 'conn' | 'unprepared' | 'empty', ... }.
+ * The car answers OK to a playlist and may still leave its list empty (the first car did, to every one): whether
+ * the item is in the list is asked first. probe: an item that is not ends the attempt there ('empty', nothing
+ * said - the caller sums those up); otherwise only BMW's own start and PLAY are tried on an empty list. */
+DynRoute.prototype.attempt = async function (form, loc, file, starts, quick, probe) {
     const tag = '[' + form.name + ' | ' + loc.name + ']';
     let value, item;
     try {
@@ -488,9 +556,9 @@ DynRoute.prototype.attempt = async function (form, loc, file, starts, quick) {
     try { r = await this.call('createPlaylist', { token: this.token, newPlaylist: item }); } catch (e) { err = errText(e); }
     this.s.tried(key, err ? 'refused: ' + err.slice(0, 80) : String(r && r.dynMediaPlayerError));
     // (the item is printed the first time its form is used: only the file's place differs after that)
-    this.shown = this.shown || {};
-    const what = this.shown[form.key] ? show(value, 120) : show(item, 300);
-    this.shown[form.key] = true;
+    const shown = this.s.shown, fam = form.family || form.key;
+    const what = shown[fam] ? show(value, 120) : show(item, 300);
+    if (!probe) shown[fam] = true;
     if (err) { this.got = null; this.say('createPlaylist ' + tag + ' ' + what + ' FAILED: ' + err); return { out: 'rejected', why: err }; }
     const code = r && r.dynMediaPlayerError;
     if (code !== 'OK') {
@@ -500,32 +568,51 @@ DynRoute.prototype.attempt = async function (form, loc, file, starts, quick) {
     }
     // taken: what it says of it, then the starts. One line of the story for all of it; what repeats the attempt
     // before (the same starts failing, the player saying the same) is said short
-    await sleep(this.o.dynEchoMs === undefined ? 400 : this.o.dynEchoMs);
-    const pos = await this.value('currentItemPosition');
-    const echo = this.echo(String(value));
-    let line = 'createPlaylist ' + tag + ' ' + what + ' -> OK, list ' + (pos ? pos.position + '/' + pos.totalNumber : '?') + (echo === 'name' ? ', it names our file' : echo === 'other' ? ', it does NOT name our file' : '');
+    const listEnd = Date.now() + (this.o.dynListMs === undefined ? 900 : this.o.dynListMs);
+    let pos, echo, listed = false;
+    for (;;) {
+        await sleep(Math.min(150, Math.max(0, listEnd - Date.now())));
+        pos = await this.value('currentItemPosition');
+        echo = this.echo(String(value));
+        const idSaid = this.got.currentItemId && this.got.currentItemId.v && this.got.currentItemId.v.length > 0;
+        listed = !!(pos && pos.totalNumber > 0) || echo !== 'none' || !!idSaid || this.playingNow() || !!this.errorNow();
+        if (listed || Date.now() >= listEnd || this.s.cancelled) break;
+    }
+    if (probe && !listed) {
+        this.got = null;
+        this.s.tried(key, 'taken, the list stays empty');
+        return { out: 'empty', item: item };
+    }
+    shown[fam] = true;
+    let line = 'createPlaylist ' + tag + ' ' + what + ' -> OK, list ' + (pos ? pos.position + '/' + pos.totalNumber : '?') + (listed ? '' : ' (empty)') + (echo === 'name' ? ', it names our file' : echo === 'other' ? ', it does NOT name our file' : '');
     let used = null;
     const tries = [];
-    for (const st of starts) {
+    // (an empty list: what BMW's code does after its playlist, and PLAY - a moment each)
+    for (const st of listed ? starts : starts.filter((x) => x.key === 'sdk' || x.key === 'pos' || x.key === 'play')) {
         if (this.playingNow() || this.errorNow() || this.s.cancelled) break;
         used = st.key;
         let res = '';
         if (st.run) { try { const x = await st.run(); res = x && x.dynMediaPlayerError === 'OK' ? '' : ' -> ' + show(x, 70); } catch (e) { res = ' failed: ' + errText(e).slice(0, 70); } }
-        await this.waitPlay(quick ? Math.min(st.ms, 1500) : st.ms);
+        await this.waitPlay(quick || !listed ? Math.min(st.ms, 1500) : st.ms);
         tries.push(st.name + res + ': ' + (this.playingNow() ? 'PLAYS' : this.errorNow() ? this.errorNow() : 'no'));
         if (quick && echo === 'other') break;      // (not our file in its list: no start will play it)
     }
     const all = tries.join(', '), heard = said();
     line += ' | started ' + (!tries.length ? 'by nothing: it ' + (this.playingNow() ? 'PLAYS' : 'said ' + this.errorNow()) : all === this.lastTries ? 'by none of them again' : all);
     line += heard === this.lastHeard ? '' : ' | the player said: ' + heard;
+    // whether the car's media engine has the file open tells a list it took from one it dropped
+    if (!this.playingNow() && /^\//.test(String(value))) {
+        const who = this.s.readers(String(value));
+        if (who !== undefined) line += who ? ' | ' + who + ' has our file open' : ' | the car\'s media engine does not have our file open';
+    }
     if (tries.length && !this.playingNow()) this.lastTries = all;
     this.lastHeard = heard;
     this.got = null;
     this.say(line);
     if (this.playingNow()) { this.s.tried(key, 'PLAYS (' + used + ')'); return { out: 'playing', start: used || 'auto' }; }
     if (this.errorNow()) { this.s.tried(key, 'taken, then ' + this.errorNow()); return { out: 'item-error', why: this.errorNow(), echo: echo }; }
-    this.s.tried(key, 'taken, never played');
-    return { out: 'idle', echo: echo };
+    this.s.tried(key, listed ? 'taken, never played' : 'taken, the list stays empty');
+    return { out: 'idle', echo: echo, listed: listed };
 };
 /* The focus of this instance, ours and kept alive, and what it then says of its connection to the car's audio:
  * once, whoever asks first (the service's own player with this focus, or the playlist below). */
@@ -545,20 +632,79 @@ DynRoute.prototype.play = async function (file, info, hint) {
     let c = await this.enter(hint);
     // (a form the binding or the service refused on an instance before is refused here too: left out)
     const refused = this.s.refused, locs = this.s.locs(), sdk = this.s.sdkFacts();
+    const ids = this.s.idForms(this.inst);
     let forms = this.s.forms(), places = locs;
     if (forms.some((f) => !refused[f.key])) forms = forms.filter((f) => !refused[f.key]);
     // an instance after one that took our file and never played it: the form that one took, the two likeliest
     // places - the long search was made there
     if (this.s.took && !hint) {
-        const f = forms.filter((x) => x.key === this.s.took)[0];
+        const f = forms.concat(ids).filter((x) => x.key === this.s.took)[0];
         if (f) { forms = [f]; places = locs.slice(0, 2); }
     }
-    const starts = this.starts([hint && hint.start, sdk.start]);
+    const starts = this.starts([hint && hint.start, sdk.startCalls ? 'sdk' : sdk.start]);
     const by = (list, k) => list.filter((x) => x.key === k)[0];
-    let queue = forms.map((f) => [f, locs[0]]), later = [];
-    if (hint && by(forms, hint.form) && by(locs, hint.loc)) queue.unshift([by(forms, hint.form), by(locs, hint.loc)]);
     const done = {}, again = {};
-    let n = 0, lastWhy = null, taken = 0, itemError = null;
+    // a token or a connection the player says it lacks: asked for again, once each a play
+    const recover = async (kind) => {
+        if (again[kind]) throw this.fail(kind === 'token' ? 'does not keep our audio focus (TOKEN_NOT_VALID)' : 'is not connected to the car\'s audio (connectionState ' + show(c.conn) + ')');
+        again[kind] = true;
+        if (kind === 'token') { if (this.beat) clearInterval(this.beat); this.beat = null; this.token = null; await this.getFocus(hint); }
+        c = await this.waitConnected(this.o.dynConnectMs === undefined ? 5000 : this.o.dynConnectMs);
+    };
+    let n = 0, lastWhy = null, taken = 0, inList = 0, itemError = null;
+    let queue = forms.map((f) => [f, locs[0]]), later = [];
+    // The car's player answers OK to a playlist and leaves its list empty. BMW's own code gives an item an id of
+    // four bytes that says which app and which player instance it is for (ours was all zeros), and the player's
+    // configuration names a store for online media. So first, a moment each: BMW's item with every id an app could
+    // give it for this instance, our file where it is, in that store and in our app's folder. One the list takes
+    // gets the starts at once.
+    if (ids.length && !hint) {
+        const pl = ['path', 'oe', 'pub'].map((k) => by(locs, k)).filter(Boolean);
+        const empty = [], not = {};
+        let sample = null, stop = false;
+        // (one line for all the list did not take, one for where the file could not be put)
+        const sum = () => {
+            if (empty.length) {
+                this.say('BMW\'s item with each id an app could give it (' + uniq(empty.map((e) => e[0])).join(', ') + '), our file ' + uniq(empty.map((e) => e[1])).join(' / ') +
+                    ': createPlaylist OK ' + empty.length + ' times, the list stays empty' + (sample && !this.s.shown.sdk ? ' | the first: ' + show(sample, 320) : ''));
+                this.s.shown.sdk = true;
+            }
+            if (Object.keys(not).length) this.say('our file could not be put: ' + Object.keys(not).map((k) => not[k]).join(' | '));
+        };
+        for (const f of ids) {
+            for (const l of pl) {
+                if (stop || this.s.cancelled || not[l.key]) continue;
+                this.s.note('Finding how this car plays sound: way ' + this.s.count() + '...');
+                let r = await this.attempt(f, l, file, starts, false, true);
+                if (r.out === 'token' || r.out === 'conn') { await recover(r.out); r = await this.attempt(f, l, file, starts, false, true); }
+                n++;
+                if (r.out !== 'empty' && r.out !== 'unprepared') done[this.key + '|' + f.key + '|' + l.key] = true;
+                if (r.out === 'playing') {
+                    sum();
+                    this.combo = { form: f.key, loc: l.key, start: r.start };
+                    this.say('PLAYS: ' + this.inst + ' | ' + f.name + ' | ' + l.name + ' | started ' + r.start);
+                    return;
+                }
+                if (r.out === 'empty') { empty.push([f.id, l.name]); sample = sample || r.item; continue; }
+                if (r.out === 'unprepared') { not[l.key] = l.name + ' (' + String(r.why).slice(0, 90) + ')'; continue; }
+                lastWhy = r.why || r.out;
+                // (a token or a connection lost, a form the binding refuses: the search below deals with those)
+                if (r.out !== 'idle' && r.out !== 'item-error') { stop = true; continue; }
+                taken++;
+                inList++;
+                if (r.out === 'item-error') itemError = r.why;
+                // in its list and not played: this id is the one; the file's other places with it
+                this.s.took = f.key;
+                queue = places.map((x) => [f, x]);
+                stop = true;
+            }
+        }
+        sum();
+        // none in its list: the likeliest id at every place once more, now with BMW's own start and PLAY each (should
+        // its list not say what it holds) and a look whether the car's media engine opened the file
+        if (!taken && !stop && forms.length !== 1) { forms = [ids[0]]; queue = places.map((x) => [ids[0], x]); }
+    }
+    if (hint && by(forms.concat(ids), hint.form) && by(locs, hint.loc)) queue.unshift([by(forms.concat(ids), hint.form), by(locs, hint.loc)]);
     // the first instance gets the whole search; the next ones a shorter one
     const deadline = Date.now() + (this.s.searched++ ? (this.o.dynNextMs || 60000) : (this.o.dynBudgetMs || 150000));
     while (queue.length || later.length) {
@@ -582,16 +728,14 @@ DynRoute.prototype.play = async function (file, info, hint) {
         lastWhy = r.why || r.out;
         if (r.out === 'rejected') refused[f.key] = true;
         if (r.out === 'token' || r.out === 'conn') {
-            if (again[r.out]) throw this.fail(r.out === 'token' ? 'does not keep our audio focus (TOKEN_NOT_VALID)' : 'is not connected to the car\'s audio (connectionState ' + show(c.conn) + ')');
-            again[r.out] = true;
-            if (r.out === 'token') { if (this.beat) clearInterval(this.beat); this.beat = null; this.token = null; await this.getFocus(hint); }
-            c = await this.waitConnected(this.o.dynConnectMs === undefined ? 5000 : this.o.dynConnectMs);
+            await recover(r.out);
             done[key] = false;
             queue.unshift([f, l]);
             continue;
         }
         if (r.out === 'idle' || r.out === 'item-error') {
             taken++;
+            if (r.listed !== false) inList++;
             if (r.out === 'item-error') itemError = r.why;
             // the player took this form and (as far as it says) understood it: no other form is asked - what is
             // left to find is the place of the file and the start
@@ -603,7 +747,7 @@ DynRoute.prototype.play = async function (file, info, hint) {
             if (f.key === 'sdk' || r.echo === 'name' || r.out === 'item-error') queue = others.concat(queue); else later = later.concat(others);
         }
     }
-    throw this.fail(taken ? 'took our file but never played it' + (itemError ? ' (' + itemError + ')' : '') : 'did not take the playlist (' + String(lastWhy).slice(0, 60) + ')');
+    throw this.fail(taken && !inList ? 'answers OK to our playlist and leaves its list empty' : taken ? 'took our file but never played it' + (itemError ? ' (' + itemError + ')' : '') : 'did not take the playlist (' + String(lastWhy).slice(0, 60) + ')');
 };
 /* From here its state, time and errors are the daemon's. */
 DynRoute.prototype.activate = function () {
@@ -625,7 +769,7 @@ DynRoute.prototype.activate = function () {
 };
 /* Another file on the live focus (the head file, then the whole one): the way that played, its start. */
 DynRoute.prototype.replay = async function (file) {
-    const forms = this.s.forms(), locs = this.s.locs(), c = this.combo;
+    const forms = this.s.forms().concat(this.s.idForms(this.inst)), locs = this.s.locs(), c = this.combo;
     const f = forms.filter((x) => x.key === c.form)[0], l = locs.filter((x) => x.key === c.loc)[0];
     if (!f || !l) throw this.fail('lost the way it played');
     const was = this.active;
@@ -844,6 +988,7 @@ function Sound(audio) {
     this.refused = {};      // this play: the item forms an instance refused
     this.searched = 0;
     this.took = null;       // ... the form an instance took (and did not play)
+    this.shown = {};        // ... the kinds of item the story has shown whole
     this.amId = null;       // the audio manager's connection of our source, while the service's own player is tried or plays
     this.scans = [];        // the last scans of the car's sound devices: { label, at, devs, map }
     this.others = [];       // the router's devices whose names say nothing (devices() fills it)
@@ -884,16 +1029,87 @@ Sound.prototype.readSdk = async function () {
     this.say('reading BMW\'s own player code among the installed apps');
     const ids = this.o.noSetuid ? {} : { uid: this.o.sdkUid === undefined ? 65534 : this.o.sdkUid, gid: this.o.sdkGid === undefined ? 65534 : this.o.sdkGid };
     let r;
-    try { r = await sdkread.read(Object.assign({ oapRoot: this.o.oapRoot, prefer: this.o.codeHomes || [], gapMs: this.o.sdkGapMs }, ids, this.o.sdkOpts || {})); } catch (e) { r = { ok: false, error: errText(e) }; }
+    try { r = await sdkread.read(Object.assign({ oapRoot: this.o.oapRoot, prefer: this.o.codeHomes || [], gapMs: this.o.sdkGapMs, logIds: (home) => this.logIds(home) }, ids, this.o.sdkOpts || {})); } catch (e) { r = { ok: false, error: errText(e) }; }
     r.at = Date.now();
     r.ver = this.o.version || '?';
     this.sdk = r;
     writeJson(this.sdkFile, r);
     this.facts = null;
     const f = this.sdkFacts();
+    const types = r.statics && Object.keys(r.statics).filter((k) => /ItemType/i.test(k))[0];
     this.say(r.ok ? 'read from ' + r.file + ': the item as BMW\'s code writes it: ' + sdkread.show(r.item) + (f.item ? '' : ' (not usable as it is)') +
-        ' | heartbeat timer ' + (f.hb === undefined ? 'not found' : f.hb) + ', every ' + (f.beatMs || '?') + ' ms | started by: ' + (f.start || 'not found')
+        ' | its id\'s type per instance: ' + (types ? sdkread.show(r.statics[types]) : 'not found') + ' | started by: ' + (f.start || 'not found')
         : 'not read: ' + r.error);
+};
+/* The numbers an app's item ids could carry (BMW's code makes one of the app's logging id: "OA15" -> 0xA15; ours
+ * is not of that kind), the likeliest first: ours made like one of BMW's apps, that of the app whose code was read,
+ * the low bytes alone, none. [{ key, n }], n null for "not a number" (what BMW's code would make of our id). */
+Sound.prototype.logIds = function (donor) {
+    const ours = appLoggingId(this.expose.appHome()), theirs = logNum(appLoggingId(donor && path.join(this.o.oapRoot || '/var/opt/public/oap', donor)));
+    let mine = logNum(ours);
+    if (mine === null) { const low = parseInt(String(ours || '').slice(-2), 16); mine = 0xA00 + (low >= 0 && low < 256 ? low : 0xF0); }
+    const out = [{ key: 'ours', n: mine }];
+    const add = (key, n) => { if (!out.some((x) => x.n === n)) out.push({ key: key, n: n }); };
+    if (theirs !== null) add('theirs', theirs);
+    add('ours-low', mine & 255);
+    if (theirs !== null) add('theirs-low', theirs & 255);
+    add('none', null);
+    return out;
+};
+/* BMW's item for our file with each id an app could give it on this player instance: [{ key, family, id, name,
+ * make }]. The ids are made by BMW's own generateItemId where its type per instance could be read (sdkread's ids);
+ * else the template's id is written here with the types 1 to 6. Each use counts the id's last two bytes on. */
+Sound.prototype.idForms = function (inst) {
+    const r = this.sdk, out = [], seen = {};
+    if (!r || !r.ok) return out;
+    const norm = (x) => String(x || '').replace(/^DynamicMediaPlayer/, '').replace(/^Entertainment/, '').replace(/Media$/, '').toLowerCase();
+    const add = (key, tpl) => {
+        const id = Array.isArray(tpl) && tpl[0] && tpl[0].id;
+        if (!Buffer.isBuffer(id) || id.length !== 4) return;
+        const hex = id.slice(0, 2).toString('hex').toUpperCase() + 'xxxx';
+        if (seen[hex]) return;
+        seen[hex] = true;
+        out.push({ key: 'sdk:' + key, family: 'sdk', id: hex, name: 'BMW\'s item, id ' + hex, make: (value, size) => {
+            const to = Buffer.from(id);
+            this.idCount = ((this.idCount || 0) + 1) & 0xffff;
+            to.writeUInt16BE(this.idCount, 2);
+            return swap(fill(tpl, value, size), id, to);
+        } });
+    };
+    const usable = (x) => x && !x.error && Array.isArray(x.out) && x.out.length === 1 && !sdkread.hasStub(x.out) && JSON.stringify(x.out).indexOf(sdkread.SAMPLE.file) >= 0;
+    const recs = (r.ids || []).filter(usable), typed = recs.filter((x) => x.inst !== null);
+    typed.filter((x) => norm(x.inst) === norm(inst)).forEach((x) => add(x.log, sdkread.decode(x.out)));
+    if (!out.length) {
+        // (no type per instance to be read: the id written here, its type tried through)
+        const tpl = this.sdkFacts().item, id = Array.isArray(tpl) && tpl[0] && tpl[0].id;
+        if (Buffer.isBuffer(id) && id.length === 4) {
+            const num = this.logIds(null)[0].n;
+            [1, 2, 3, 4, 5, 6].forEach((t) => add('ours.' + t, swap(tpl, id, itemId(num, t, 0))));
+            recs.filter((x) => x.inst === null).forEach((x) => add(x.log, sdkread.decode(x.out)));
+        }
+    }
+    return out;
+};
+/* Which of the car's media programs has this file open now: its name, null (none of them), undefined (they were
+ * not found: nothing can be said). */
+Sound.prototype.readers = function (p) {
+    const proc = this.o.procDir || '/proc';
+    let pids, real = p, found = 0;
+    try { pids = fs.readdirSync(proc).filter((n) => /^\d+$/.test(n)); } catch (e) { return undefined; }
+    try { real = fs.realpathSync(p); } catch (e) { /* as given */ }
+    for (const pid of pids) {
+        let comm, fds;
+        try { comm = fs.readFileSync(path.join(proc, pid, 'comm'), 'utf8').trim(); } catch (e) { continue; }
+        if (!/^(mediaengine|mediaapp)/i.test(comm)) continue;
+        found++;
+        try { fds = fs.readdirSync(path.join(proc, pid, 'fd')); } catch (e) { continue; }
+        for (const fd of fds) {
+            let t;
+            try { t = fs.readlinkSync(path.join(proc, pid, 'fd', fd)); } catch (e) { continue; }
+            if (t === p || t === real) return comm;
+        }
+    }
+    return found ? null : undefined;
 };
 /* What is used of it: { item (decoded, no stand-in inside), hb, beatMs, start }. */
 Sound.prototype.sdkFacts = function () {
@@ -915,10 +1131,21 @@ Sound.prototype.sdkFacts = function () {
         f.clientName = asks.map((c) => c.args.clientName).filter(plain)[0];
         const iv = (r.timers || []).filter((t) => t.kind === 'interval' && /heartBeat/i.test(String(t.fn)) && t.ms >= 100)[0];
         if (iv) f.beatMs = iv.ms;
-        const pf = (r.calls || []).filter((c) => /playFile\(/.test(String(c.in)));
+        // (its playFile as the class made like an app's ran it, where that got as far as the playlist; else the bare one)
+        const made = (r.calls || []).filter((c) => /^constructed: playFile\(/.test(String(c.in)));
+        const pf = made.some((c) => c.method === 'createPlaylist') ? made : (r.calls || []).filter((c) => /^playFile\(/.test(String(c.in)));
         const i = pf.map((c) => c.method).indexOf('createPlaylist');
         if (i >= 0) {
             const next = pf.slice(i + 1).map((c) => c.method);
+            // what it asks of the player after its playlist, each with whole arguments: asked the same way first
+            // (only what can start a list: nothing that gives the focus back or writes another list)
+            const after = [];
+            for (const c of pf.slice(i + 1)) {
+                if (c.method === 'heartBeat') continue;
+                if (START_CALLS.indexOf(c.method) < 0 || after.length >= 6) break;
+                after.push(c);
+            }
+            if (after.length && after.every((c) => c.args && typeof c.args === 'object' && !Array.isArray(c.args) && !sdkread.hasStub(c.args))) f.startCalls = after.map((c) => ({ method: c.method, args: sdkread.decode(c.args) }));
             f.start = next.indexOf('setCurrentItemPositionAndTime') >= 0 ? 'pos' : next.indexOf('sendButtonEventDirect') >= 0 ? 'play' : next.indexOf('setAutoplay') >= 0 ? 'autoplay' : 'auto';
         }
     } catch (e) { this.o.log('sound: BMW\'s code as read is not usable: ' + errText(e)); }
@@ -942,20 +1169,9 @@ Sound.prototype.clientIds = function () {
 };
 /* The ways a playlist item is written: BMW's own first (when read), then the likely ones. */
 Sound.prototype.forms = function () {
-    const out = [], t = this.sdkFacts().item, S = sdkread.SAMPLE;
+    const out = [], t = this.sdkFacts().item;
     if (t) {
-        const put = (v, value, size) => {
-            if (typeof v === 'string') return v.split(S.file).join(value);
-            if (typeof v === 'number') return v === S.size ? size : v;
-            if (Buffer.isBuffer(v)) {
-                for (const encn of ['utf8', 'utf16le']) { const at = v.indexOf(Buffer.from(S.file, encn)); if (at >= 0) return Buffer.concat([v.slice(0, at), Buffer.from(value, encn), v.slice(at + Buffer.from(S.file, encn).length)]); }
-                return Buffer.from(v);
-            }
-            if (Array.isArray(v)) return v.map((x) => put(x, value, size));
-            if (v && typeof v === 'object' && !ArrayBuffer.isView(v)) { const o = {}; Object.keys(v).forEach((k) => { o[k] = put(v[k], value, size); }); return o; }
-            return v;
-        };
-        out.push({ key: 'sdk', name: 'as BMW\'s own code writes it', make: (value, size) => put(t, value, size) });
+        out.push({ key: 'sdk', name: 'as BMW\'s own code writes it', make: (value, size) => fill(t, value, size) });
     }
     const bytes = (b) => b, arr = (b) => Array.prototype.slice.call(b);
     const mk = (str, num, idf, withSize) => (value, size, id) => [{ pos: 1, id: idf(id), metadata: [{ key: 'FILE_NAME', value: str(value) }].concat(withSize && size ? [{ key: 'FILE_SIZE', value: num(size) }] : []) }];
@@ -979,6 +1195,7 @@ Sound.prototype.locs = function () {
     return [
         { key: 'path', name: 'where the file is', value: async (f) => readable(f) },
         { key: 'pub', name: 'a copy in our app\'s data folder', value: pub },
+        { key: 'oe', name: 'a copy in the car\'s store for online media', value: once('oe', (f) => ex.store(readable(f))) },
         { key: 'url', name: 'file:// and its path', value: async (f) => 'file://' + readable(f) },
         { key: 'run', name: 'a copy under /run', value: once('run', (f) => ex.run(readable(f))) },
         { key: 'http', name: 'http://127.0.0.1 from this service', value: once('http', (f) => ex.http(readable(f))) },
@@ -1093,7 +1310,9 @@ Sound.prototype.play = async function (file, info) {
     this.refused = {};
     this.searched = 0;
     this.took = null;
+    this.shown = {};
     const run = { at: Date.now(), file: path.basename(file), lines: [], result: null };
+    this.lastFile = file;
     this.runs.unshift(run);
     if (this.runs.length > 3) this.runs.length = 3;
     const st = this.state, errors = [];
@@ -1283,7 +1502,7 @@ Sound.prototype.lines = function () {
         else {
             // (a long search: its start, where each route ended, its end - the service's log file has every line)
             const keep = {};
-            run.lines.forEach((l, k) => { if (k < 40 || k >= run.lines.length - 14 || /PLAYS|NOT through|answers|getAudioFocus|the devices |sound devices/.test(l)) keep[k] = true; });
+            run.lines.forEach((l, k) => { if (k < 40 || k >= run.lines.length - 14 || /PLAYS|NOT through|answers|getAudioFocus|the devices |sound devices|each id|could not be put|read from/.test(l)) keep[k] = true; });
             let gap = 0;
             run.lines.forEach((l, k) => {
                 if (keep[k]) { if (gap) out.push('  ... ' + gap + ' more attempts like these (the log has them: ' + path.join(this.o.logDir || '', 'sound.log') + ')'); gap = 0; out.push(l); } else gap++;
@@ -1296,40 +1515,114 @@ Sound.prototype.lines = function () {
     }
     return out;
 };
-/* BMW's own player code as read on this car: the item as it writes it, its calls, its timers, its methods' text. */
-/* How BMW's own code asks the player for the audio focus, for the top of the page: the player answers BAD_ARGUMENT to
- * our asking, and this is where the right one is to be seen - its call as the reading recorded it (what it takes
- * from the app shows as <...>), the text of the methods that make it, and how the two apps name themselves. */
-Sound.prototype.focusLines = function () {
+/* How BMW's own code plays a file, for the top of the page: the car gives us the focus and takes our playlist, and
+ * its list stays empty - what is left to learn is here. What the class carries and makes of the app it runs in, the
+ * ids it gives an item, its calls once made as an app makes it, then the text of the parts that decide: what starts
+ * a playlist, how an item's id is made, where an app keeps the file it plays. */
+Sound.prototype.playLines = function () {
     const out = [], r = this.sdk;
     if (!r) return ['BMW\'s own player code has not been looked for yet (a play does that).'];
     out.push('BMW\'s own player code: ' + (r.ok ? 'read from ' + r.file + ' (class ' + r.cls + ')' : 'NOT read: ' + r.error + (r.file ? ' (' + r.file + ')' : '')));
-    const asks = (r.calls || []).filter((c) => /AudioFocus|heartBeat/.test(c.method));
-    if (asks.length) out.push('It asks: ' + uniq(asks.map((c) => c.method + '(' + sdkread.show(c.args).slice(0, 320) + ') [in ' + c.in + ']')).slice(0, 5).join(' || '));
-    const beats = (r.timers || []).filter((t) => /heart/i.test(String(t.fn) + t.in));
-    if (beats.length) out.push('Its heartbeat: ' + uniq(beats.map((t) => t.kind + ' ' + t.ms + ' ms [' + t.in + ']')).slice(0, 4).join(' || '));
-    Object.keys(r.methods || {}).filter((n) => this.focusText(n)).forEach((n) => out.push('[' + n + '] ' + String(r.methods[n]).slice(0, n === 'constructor' ? 1300 : 1700)));
-    (r.near || []).filter((x) => /AudioFocus|HeartBeat/i.test(x.what)).slice(0, 7).forEach((x) => out.push('[near ' + x.what + '] ' + String(x.text).slice(0, 950)));
-    // how the app whose code this is names itself, and how ours does: a name the player knows may be one of these
-    const pkg = (home) => {
-        const j = home ? readJson(path.join(home, 'source', 'package.json')) : null;
-        if (!j || typeof j !== 'object') return null;
-        const o = {};
-        Object.keys(j).slice(0, 40).forEach((k) => { const v = j[k]; if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') o[k] = typeof v === 'string' ? v.slice(0, 60) : v; else if (v && typeof v === 'object' && /oap|app|bmw|config|audio|media/i.test(k)) o[k] = JSON.stringify(v).slice(0, 260); });
-        return path.basename(home) + ' ' + JSON.stringify(o).slice(0, 700);
-    };
+    const st = r.statics ? Object.keys(r.statics) : [];
+    if (st.length) out.push('What the class carries: ' + st.map((k) => k + ' = ' + sdkread.show(r.statics[k]).slice(0, 300)).join(' | '));
+    if (r.fields && Object.keys(r.fields).length) out.push('Made as an app makes it' + (r.states && r.states[0] ? ' (' + r.states[0][0] + ')' : '') + ': ' + Object.keys(r.fields).map((k) => k + ' = ' + sdkread.show(r.fields[k]).slice(0, 80)).join(' | '));
+    const hex = (x) => { const it = Array.isArray(x.out) && x.out[0] && x.out[0].id; return x.error ? 'failed (' + String(x.error).slice(0, 50) + ')' : it && it.$ === 'buffer' ? String(it.hex).toUpperCase() : sdkread.show(x.n).slice(0, 30); };
+    if (r.ids && r.ids.length) {
+        const by = {};
+        r.ids.forEach((x) => { const k = x.inst === null ? '(no instance)' : x.inst; (by[k] = by[k] || []).push(x.log + ' ' + hex(x)); });
+        out.push('The ids its generateItemId gives (the number of the app: ' + this.logIds(r.file && (/(oap_\d+)\//.exec(r.file) || [])[1]).map((l) => l.key + ' ' + (l.n === null ? 'none' : '0x' + l.n.toString(16).toUpperCase())).join(', ') + '): ' +
+            Object.keys(by).map((k) => k + ': ' + by[k].join(', ')).join(' | '));
+    }
+    const made = (r.calls || []).filter((c) => /^constructed/.test(String(c.in)));
+    if (made.length) out.push('Its calls, made that way: ' + made.slice(0, 14).map((c) => '[' + String(c.in).replace(/^constructed: /, '') + '] ' + c.method + '(' + sdkread.show(c.args).slice(0, 300) + ')').join(' || '));
+    // what it asks of anything else than the player once an item is set (its "sound property"), and which of the
+    // car's interfaces has such a method
+    const oth = r.other || [];
+    if (oth.length) {
+        out.push('What it asks beside the player (its "sound property"): ' + uniq(oth.map((c) => c.path + '(' + sdkread.show(c.args).slice(0, 260) + ')')).slice(0, 5).join(' || '));
+        uniq(oth.map((c) => c.method).filter((m) => /^[A-Za-z_]\w{3,}$/.test(String(m)))).slice(0, 3).forEach((m) => {
+            try { if (typeof this.a.ifacesWith === 'function') this.a.ifacesWith(m).forEach((l) => out.push('  ' + l)); } catch (e) { out.push('  ' + m + ': not looked up (' + errText(e) + ')'); }
+        });
+    }
+    if (r.states) out.push('Its states against a simulated car: ' + r.states.map((x) => x[0] + ' = ' + x[1]).join(' | '));
+    const notes = (r.notes || []).concat(Object.keys(r.failed || {}).slice(0, 6).map((id) => 'module ' + id + ' did not load: ' + r.failed[id]));
+    if (notes.length) out.push('Notes of the reading: ' + notes.join(' || ').slice(0, 900));
+    // the keys an item's metadata may have, from the player's description on the car
+    try {
+        const keys = [];
+        const walk = (v, d) => {
+            if (!v || typeof v !== 'object' || d > 9 || keys.length) return;
+            const names = Array.isArray(v) ? v.map((x) => (x && typeof x === 'object' ? x.name : x)).filter((x) => typeof x === 'string') : Object.keys(v);
+            if (names.indexOf('FILE_NAME') >= 0) { names.forEach((x) => keys.push(x)); return; }
+            (Array.isArray(v) ? v : Object.keys(v).map((k) => v[k])).forEach((x) => walk(x, d + 1));
+        };
+        walk(this.a.dyn && this.a.dyn.cfg, 0);
+        if (keys.length) out.push('The keys an item\'s metadata may have (the player\'s description): ' + keys.slice(0, 60).join(', '));
+    } catch (e) { /* not this time */ }
     try {
         const m = r.file ? /^(.*\/oap_\d+)\//.exec(r.file) : null;
-        const theirs = pkg(m && m[1]), ours = pkg(this.expose.appHome());
-        if (theirs) out.push('That app\'s package: ' + theirs);
-        if (ours) out.push('Our app\'s package: ' + ours);
+        out.push('Logging ids: that app\'s ' + (appLoggingId(m && m[1]) || 'not found') + ' | ours ' + (appLoggingId(this.expose.appHome()) || 'not found'));
     } catch (e) { /* not this time */ }
+    (r.play || []).forEach((x) => out.push('[' + x.what + '] ' + String(x.text).slice(0, /starts the playlist/.test(x.what) ? 820 : 700)));
+    // (the class's own methods that decide what the car is given after the focus)
+    ['setPlaylist', 'playlistItemConverter', 'setSoundProperty', 'handleSinkNotification', 'waitForDecoder', 'setImageRequestProperty', 'sendResume', 'sendPause', 'sendButtonEvent', 'sendButtonPressAndRelease', 'startNewIfNoExistingPlayback', 'resetPlayback', 'connect'].forEach((n) => {
+        if (r.methods && r.methods[n]) out.push('[' + n + '] ' + String(r.methods[n]).slice(0, n === 'playlistItemConverter' ? 900 : n === 'setPlaylist' || n === 'setSoundProperty' ? 650 : 420));
+    });
     return out;
 };
-/* Whether a method of BMW's class is about the focus (its text goes to the top of the page, not further down). */
-Sound.prototype.focusText = function (n) {
-    const t = String((this.sdk && this.sdk.methods && this.sdk.methods[n]) || '');
-    return /getAudioFocus\s*\(|\.heartBeat\s*\(/.test(t) || (n === 'constructor' && t.length > 0);
+/* Where the car's media programs may read a file: who they run as, the store for online media their configuration
+ * names (what is in it, who owns it), the folder the app whose code was read keeps its data in, and whether others
+ * can reach the file we name. Names and modes only: nothing is opened. */
+Sound.prototype.whereLines = function () {
+    const out = [], proc = this.o.procDir || '/proc';
+    const mode = (st) => (st.mode & 0o7777).toString(8) + ' ' + st.uid + ':' + st.gid;
+    const ls = (dir, max) => {
+        let names;
+        try { names = fs.readdirSync(dir).sort(); } catch (e) { return 'not readable (' + (e.code || errText(e)) + ')'; }
+        return (names.slice(0, max).map((n) => {
+            let st, link = '';
+            try { st = fs.lstatSync(path.join(dir, n)); } catch (e) { return n + ' (?)'; }
+            if (st.isSymbolicLink()) { try { link = ' -> ' + fs.readlinkSync(path.join(dir, n)); } catch (e) { link = ' -> ?'; } }
+            let inside = '';
+            if (st.isDirectory()) { try { const sub = fs.readdirSync(path.join(dir, n)); inside = sub.length ? ' [' + sub.length + ': ' + sub.slice(0, 4).join(', ').slice(0, 90) + (sub.length > 4 ? ', ...' : '') + ']' : ' [empty]'; } catch (e) { inside = ' [not readable]'; } }
+            return n.slice(0, 48) + (st.isDirectory() ? '/' : '') + link + ' (' + mode(st) + ')' + inside;
+        }).join(' | ') || 'empty') + (names.length > max ? ' | +' + (names.length - max) + ' more' : '');
+    };
+    try {
+        const who = [];
+        fs.readdirSync(proc).filter((n) => /^\d+$/.test(n)).forEach((pid) => {
+            let comm, status;
+            try { comm = fs.readFileSync(path.join(proc, pid, 'comm'), 'utf8').trim(); } catch (e) { return; }
+            if (!/^(mediaengine|mediaapp)/i.test(comm) || who.length >= 4) return;
+            try { status = fs.readFileSync(path.join(proc, pid, 'status'), 'utf8'); } catch (e) { status = ''; }
+            const f = (k) => { const m = new RegExp('^' + k + ':\\s*(.*)$', 'm').exec(status); return m ? m[1].trim().split(/\s+/) : []; };
+            who.push(comm + ' (' + pid + '): user ' + (f('Uid')[1] || '?') + ', group ' + (f('Gid')[1] || '?') + ', more groups ' + (f('Groups').slice(0, 14).join(' ') || 'none'));
+        });
+        out.push('The car\'s media programs run as: ' + (who.join(' | ') || 'not found'));
+    } catch (e) { out.push('The car\'s media programs: not readable'); }
+    const root = this.o.oeDir || '/mnt/share/ent/oe';
+    try { out.push('The car\'s store for online media ' + root + ' (' + mode(fs.statSync(root)) + '): ' + ls(root, 24)); } catch (e) {
+        out.push('The car\'s store for online media ' + root + ': not there (' + (e.code || errText(e)) + ')');
+        if (fs.existsSync(path.dirname(root))) out.push('  ' + path.dirname(root) + ': ' + ls(path.dirname(root), 16));
+    }
+    try {
+        const mounts = fs.readFileSync(path.join(proc, 'mounts'), 'utf8').split('\n').filter((l) => /\s\/mnt\/share|\/oap(\s|\/)/.test(l)).slice(0, 8).map((l) => l.split(/\s+/).slice(0, 4).join(' ').slice(0, 150));
+        if (mounts.length) out.push('Mounted there: ' + mounts.join(' | '));
+    } catch (e) { /* none readable */ }
+    try {
+        const m = this.sdk && this.sdk.file ? /^(.*\/oap_\d+)\//.exec(this.sdk.file) : null;
+        if (m) out.push('The folder of the app whose code was read, ' + m[1] + ': ' + ls(m[1], 12) + ' || its data: ' + ls(path.join(m[1], 'data'), 16));
+        const home = this.expose.appHome();
+        if (home) out.push('Our app\'s folder ' + home + ': ' + ls(home, 12));
+    } catch (e) { /* not this time */ }
+    if (this.lastFile) {
+        try {
+            const shut = [];
+            for (let d = path.dirname(this.lastFile); d !== '/' && d !== '.'; d = path.dirname(d)) { const st = fs.statSync(d); if ((st.mode & 0o005) !== 0o005) shut.push(d + ' (' + mode(st) + ')'); }
+            out.push('Our file ' + this.lastFile + ' (' + mode(fs.statSync(this.lastFile)) + ')' + (shut.length ? ' | folders on its way that other users cannot enter: ' + shut.join(', ') : ' | every folder on its way can be entered by other users'));
+        } catch (e) { out.push('Our file ' + this.lastFile + ': gone by now'); }
+    }
+    return out;
 };
 /* How the car's programs are wired to its sound (ytalsa.py probe's "plumbing"), the telling parts first. */
 Sound.prototype.plumbingLines = function () {
@@ -1347,25 +1640,15 @@ Sound.prototype.plumbingLines = function () {
     put('Configuration files', p.files, 500);
     return out;
 };
+/* The rest of what was read of BMW's code (the whole page only): its calls, its methods' text. */
 Sound.prototype.codeLines = function () {
     const out = [], r = this.sdk;
-    if (r) {
-        const f = this.sdkFacts();
-        out.push('BMW\'s own player code: ' + (r.ok ? 'read from ' + r.file + ' (class ' + r.cls + ', module ' + r.module + ' of ' + r.modules + ')' : 'NOT read: ' + r.error + (r.file ? ' (' + r.file + ')' : '')));
-        if (r.ok) {
-            out.push('The item as it writes it: ' + sdkread.show(r.item) + (f.item ? '' : ' | NOT usable as it is'));
-            (r.convert || []).slice(1).forEach((c) => { if (c.error || JSON.stringify(c.out) !== JSON.stringify(r.item)) out.push('  ' + c.how + ': ' + (c.error ? 'failed: ' + c.error : sdkread.show(c.out))); });
-        }
-        if (r.calls && r.calls.length) out.push('Its calls of the player: ' + r.calls.slice(0, 30).map((c) => '[' + c.in + '] ' + c.method + '(' + sdkread.show(c.args).slice(0, 330) + ')').join(' || '));
-        if (r.timers && r.timers.length) out.push('Its timers: ' + r.timers.slice(0, 12).map((t) => t.kind + ' ' + t.ms + ' ms [' + t.in + '] ' + t.fn).join(' || '));
-        if (r.states) out.push('Its states against a simulated car: ' + r.states.map((s) => s[0] + ' = ' + s[1]).join(' | '));
-        const notes = (r.notes || []).concat(Object.keys(r.failed || {}).slice(0, 6).map((id) => 'module ' + id + ' did not load: ' + r.failed[id]));
-        if (notes.length) out.push('Notes of the reading: ' + notes.join(' || '));
-        if (r.methodNames) out.push('Its methods: ' + r.methodNames.join(', '));
-        // (the methods about the focus are at the top of the page: focusLines)
-        Object.keys(r.methods || {}).filter((n) => !this.focusText(n)).forEach((n) => out.push('[' + n + '] ' + r.methods[n]));
-        (r.near || []).filter((x) => !/AudioFocus|HeartBeat/i.test(x.what)).forEach((x) => out.push('[near ' + x.what + '] ' + x.text));
-    }
+    if (!r) return out;
+    if (r.calls && r.calls.length) out.push('Its calls of the player: ' + r.calls.slice(0, 30).map((c) => '[' + c.in + '] ' + c.method + '(' + sdkread.show(c.args).slice(0, 330) + ')').join(' || '));
+    if (r.timers && r.timers.length) out.push('Its timers: ' + r.timers.slice(0, 12).map((t) => t.kind + ' ' + t.ms + ' ms [' + t.in + '] ' + t.fn).join(' || '));
+    if (r.methodNames) out.push('Its methods: ' + r.methodNames.join(', '));
+    Object.keys(r.methods || {}).forEach((n) => out.push('[' + n + '] ' + r.methods[n]));
+    (r.near || []).forEach((x) => out.push('[near ' + x.what + '] ' + x.text));
     return out;
 };
 /* The car's sound devices: what was listened to and what took samples, then the router's own lists. */

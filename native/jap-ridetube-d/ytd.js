@@ -16,7 +16,7 @@ const cp = require('child_process');
 const readline = require('readline');
 
 // this service's version (component.json's: test_ytd.js checks they agree), told to the app with the diagnostics
-const VERSION = '0.5.1';
+const VERSION = '0.5.2';
 const ID_RE = /^[A-Za-z0-9_-]{11}$/;
 // the audio route on iDrive 7 (measured on the car); state/audio.json overrides them (see Audio.init)
 const SOURCE_ID = 1046, SINK_ID = 1024, MEDIA_INSTANCE = 'OapGenericMedia';
@@ -928,6 +928,30 @@ Audio.prototype.amPlayerIfaces = function () {
     this.amIf = out;
     return out;
 };
+/* The interfaces of the unit's catalog that have a method of this name (what BMW's own player code was read to
+ * ask beside the player), described as generate() does: lines for the page. Nothing is asked of the car. */
+Audio.prototype.ifacesWith = function (method) {
+    this.withM = this.withM || {};
+    if (this.withM[method]) return this.withM[method];
+    const out = [];
+    const cat = (this.opts.catalogs || []).filter((p) => fs.existsSync(p))[0];
+    const db = cat ? readJsonCapped(cat, MAX_CATALOG) : null;
+    const ifs = db && db.interfaces && typeof db.interfaces === 'object' ? db.interfaces : null;
+    const needle = '"' + method + '"';
+    const ids = ifs ? Object.keys(ifs).filter((k) => { try { return JSON.stringify(ifs[k]).indexOf(needle) >= 0; } catch (e) { return false; } }) : [];
+    if (!ids.length) out.push(method + ': in no interface of the catalog' + (cat ? '' : ' (no catalog)'));
+    ids.slice(0, 3).forEach((id) => {
+        const r = this.generate(id);
+        if (!r.cfg) { out.push(method + ': ' + id + ', not described (' + r.error + ')'); return; }
+        let lines;
+        try { lines = describeIface(r.cfg).filter((l) => l.indexOf(method) >= 0); } catch (e) { lines = ['could not be printed: ' + errText(e)]; }
+        out.push(method + ': ' + id + ' | service ' + hex(idsOf(r.cfg, '').service) + ' | instances: ' + ((instancesOf(r.cfg) || []).slice(0, 24).join(', ') || 'none listed') +
+            (lines.length ? ' | ' + lines.join(' | ').slice(0, 900) : ''));
+    });
+    if (ids.length > 3) out.push(method + ': and ' + (ids.length - 3) + ' more (' + ids.slice(3, 9).join(', ') + ')');
+    this.withM[method] = out;
+    return out;
+};
 /* The instance to use of a description: the one measured on iDrive 7 ('1'; the player's from conf) where the
  * description has it or lists none. Else, for CommandControl, the only one there is; for the player (unless
  * audio.json names one) the only one named like the generic OAP media player. Else an error naming those it has. */
@@ -1238,8 +1262,13 @@ Audio.prototype.lists = async function (cc) {
     const from = await this.listsFrom(cc);
     const list = async (attr) => {
         const px = attr === 'listOfMainConnections' ? cc : from;
-        try { const v = await withTimeout(Promise.resolve().then(() => px.getValue(attr, 4000)), 4500, attr); return Array.isArray(v) ? v : null; } catch (e) { return null; }
+        try {
+            const v = await withTimeout(Promise.resolve().then(() => px.getValue(attr, 4000)), 4500, attr);
+            if (!Array.isArray(v)) why[attr] = 'it answered ' + (v === null ? 'null' : typeof v);
+            return Array.isArray(v) ? v : null;
+        } catch (e) { why[attr] = errText(e).slice(0, 90); return null; }
     };
+    const why = d.listWhy = {};
     const name = (x) => String(x && (x.name || x.sourceName || x.sinkName) || '');
     const idOf = (x, k) => (x && typeof x[k] === 'number' ? x[k] : null);
     const fmt = (l, k) => (l ? l.map((x) => idOf(x, k) + (name(x) ? ':' + name(x) : '')).join(' ') : null);
@@ -2162,12 +2191,16 @@ Daemon.prototype.diagLines = async function () {
         let sl = [];
         try { sl = snd.lines(); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
         sl.forEach((l) => out.push(l));
-        // how BMW's own code asks for the audio focus: what our asking has to become
-        try { sl = snd.focusLines(); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
-        if (sl.length) { out.push('# How BMW\'s own code asks for the sound'); sl.forEach((l) => out.push(l)); }
-        // how the car's programs are wired to its sound, and its sound devices: what the service's own player rests on
-        try { sl = snd.plumbingLines().concat(snd.deviceLines()); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
-        if (sl.length) { out.push('# The car\'s sound devices'); sl.forEach((l) => out.push(l)); }
+        // where the car's player may read a file, then how BMW's own code plays one: what our playlist has to become
+        try { sl = snd.whereLines(); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
+        if (sl.length) { out.push('# Where the car\'s player may read a file'); sl.forEach((l) => out.push(l)); }
+        try { sl = snd.playLines(); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
+        if (sl.length) { out.push('# How BMW\'s own code plays a file'); sl.forEach((l) => out.push(l)); }
+        // how the car's programs are wired to its sound, and its sound devices (the whole page only: read on the first car)
+        if (o.diagFull) {
+            try { sl = snd.plumbingLines().concat(snd.deviceLines()); } catch (e) { sl = ['could not be printed: ' + errText(e)]; }
+            if (sl.length) { out.push('# The car\'s sound devices'); sl.forEach((l) => out.push(l)); }
+        }
         // a way that took samples and was not heard: how a player tells the audio manager that its source plays
         if (Object.keys((snd.state && snd.state.silent) || {}).some((k) => /^(direct|focus):/.test(k))) {
             try { sl = a.amPlayerIfaces(); } catch (e) { sl = ['could not be read: ' + errText(e)]; }
@@ -2179,8 +2212,10 @@ Daemon.prototype.diagLines = async function () {
     out.push(d.ready ? (d.mp && d.mp.available === false ? 'The car\'s audio manager answers; its media player "' + d.mp.instance + '" does NOT (a play fails there).'
         : 'Ready: the car\'s audio manager and player answer.')
         : 'NOT READY - ' + (d.error || 'starting') + ' | stopped at: ' + d.stage + ' | try ' + d.tries);
-    out.push('SOME/IP binding: ' + (d.binding || 'not loaded' + (typeof o.someip === 'string' ? ' (' + o.someip + (fs.existsSync(o.someip) ? ' is there' : ' is NOT there') + ')' : '')));
-    [['cc', 'CommandControl'], ['mp', 'MediaPlayer']].forEach((k) => {
+    // (where the sound is being searched for, the story above tells it: what was read on the first car is left out)
+    const brief = !!snd && !!(snd.runs && snd.runs.length) && d.ready && !o.diagFull;
+    if (!brief) out.push('SOME/IP binding: ' + (d.binding || 'not loaded' + (typeof o.someip === 'string' ? ' (' + o.someip + (fs.existsSync(o.someip) ? ' is there' : ' is NOT there') + ')' : '')));
+    (brief ? [] : [['cc', 'CommandControl'], ['mp', 'MediaPlayer']]).forEach((k) => {
         const x = d[k[0]];
         if (!x) { out.push(k[1] + ': not looked for yet'); return; }
         out.push(k[1] + ': ' + (x.file ? 'description ' + x.file : 'NO description') +
@@ -2190,7 +2225,7 @@ Daemon.prototype.diagLines = async function () {
             (x.file ? ' | answers: ' + yn(x.available) : '') + (x.lacks && x.lacks.length ? ' | the description lacks: ' + x.lacks.join(', ') : '') +
             (x.error && x.error !== d.error ? ' | ' + x.error : '') + (x.generator ? ' | generator: ' + x.generator : ''));
     });
-    if (d.players) {
+    if (brief) { /* said by the story */ } else if (d.players) {
         // those that answer, and each of the OAP, dynamic, online and generic ones
         const tag = (x) => x.inst + (x.ids.instance !== null ? '=' + hex(x.ids.instance) : '');
         const special = d.players.filter((x) => /oap|dynamic|online|generic|browser|temp/i.test(x.inst));
@@ -2200,19 +2235,20 @@ Daemon.prototype.diagLines = async function () {
     const conf = a.conf();
     out.push('Route: source ' + a.src + ' (listed: ' + yn(a.srcListed) + ') to sink ' + a.sink + ' (listed: ' + yn(a.sinkListed) + ')' +
         (Object.keys(conf.set).length ? ' | audio.json: ' + js(conf.set) : ''));
-    out.push('Sources: ' + (d.sources === null ? 'not read' : d.sources || 'none'));
-    out.push('Sinks: ' + (d.sinks === null ? 'not read' : d.sinks || 'none'));
+    const why = (k) => (d.listWhy && d.listWhy[k] ? ' (' + d.listWhy[k] + ')' : '');
+    out.push('Sources: ' + (d.sources === null ? 'not read' + why('listOfMainSources') : d.sources || 'none'));
+    out.push('Sinks: ' + (d.sinks === null ? 'not read' + why('listOfMainSinks') : d.sinks || 'none'));
     out.push('Connections (id:source>sink): ' + (d.conns === null ? 'not read' : d.conns || 'none'));
     d.notes.forEach((n) => out.push('Note: ' + n));
-    if (d.play) {
+    if (brief) { /* said by the story */ } else if (d.play) {
         out.push('Last play: ' + d.play.file + ' | route ' + (d.play.route || '-') + ' | player answers: ' + yn(d.play.player) + ' | connect ' + (d.play.connect || '-') +
             (d.play.waited ? ' (waited ' + d.play.waited + ' ms for it after connecting)' : '') +
             ' | playFile ' + (d.play.playFile || '-') + (d.play.error ? ' | ERROR ' + d.play.error : ''));
     } else out.push('Last play: none since the service started');
     const ev = Object.keys(d.events);
-    out.push('Player events: ' + (ev.length ? ev.map((k) => k + ' ' + js(d.events[k])).join(' | ') : 'none yet'));
+    if (!brief) out.push('Player events: ' + (ev.length ? ev.map((k) => k + ' ' + js(d.events[k])).join(' | ') : 'none yet'));
     const dyn = d.dyn;
-    if (dyn) {
+    if (dyn && !brief) {
         out.push('# The dynamic media player');
         if (!dyn.file) out.push('No description of a DynamicMediaPlayer on this head unit.');
         else {
@@ -2226,8 +2262,8 @@ Daemon.prototype.diagLines = async function () {
             else out.push('Its description: ' + short.filter((l) => /^(methods|fields|events) \(/.test(l)).map((l) => l.split(':')[0]).join(', ') + ' (printed whole by 0.4.6)');
         }
     }
-    // BMW's own player code as read on this car: after the story above, which says whether it was needed
-    if (snd) {
+    // the rest of BMW's own player code as read on this car (the whole page only)
+    if (snd && o.diagFull) {
         let more = [];
         try { more = snd.codeLines(); } catch (e) { more = ['could not be printed: ' + errText(e)]; }
         if (more.length) { out.push('# BMW\'s own player code, read on this car'); more.forEach((l) => out.push(l)); }
@@ -2263,7 +2299,7 @@ Daemon.prototype.diagLines = async function () {
     out.push('Video decoder: ' + (this.decoder || 'not checked') + ' | ytdec ' + (fs.existsSync(o.ytdec) ? 'there' : 'MISSING'));
     out.push('Internet uid: ' + (this.fetchUid === null ? 'none yet' : this.fetchUid) + ' | uplink lease: ' + (fs.existsSync(o.leaseFile) ? 'there' : 'not there'));
     out.push('# Log (the last lines)');
-    this.recent.slice(-10).forEach((l) => out.push(l));
+    this.recent.slice(-8).forEach((l) => out.push(l));
     return out;
 };
 Daemon.prototype.sendDiag = async function () {
